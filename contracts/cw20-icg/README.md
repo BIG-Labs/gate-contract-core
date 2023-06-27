@@ -1,0 +1,1 @@
+`cw20-base` contract extended with `gate` implementation to make the token bridgable.
