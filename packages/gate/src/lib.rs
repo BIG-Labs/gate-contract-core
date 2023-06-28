@@ -168,8 +168,8 @@ pub enum Permission {
 pub enum GateRequest {
     /// Send a msg to a specific contract in a remote chain.
     /// The contract that should receive has to:
-    /// - Set the `Permission` in the `gate` contract (if Permission::Permissioned, the remote `gate` assert if the contract allow to receive msg from the `sender`);
-    /// - Handle the `ReceiveGateMsg(GateMsg::ReceviedMsg)` on its `ExecuteMsg` variant
+    /// - Set the `Permission` in the `gate` contract (if Permission::Permissioned, the remote `gate` assert if the contract allows to receive msg from the `sender`);
+    /// - Handle the `ReceiveGateMsg(GateMsg::ReceviedMsg)` in its `ExecuteMsg` variant
     SendMsg {
         msg: Binary,
         to_contract: String,
@@ -177,8 +177,8 @@ pub enum GateRequest {
     },
 
     /// Perform a list queries in a remote chain.
-    /// Once the result turn back into the chain, the gate send a ExecuteMsg to the asker contract.
-    /// The asker contract must hanlde the `ReceiveGateMsg(GateMsg::QueryResponse)` on its `ExecuteMsg` variant.
+    /// Once the result returns to the source chain, the gate sends an ExecuteMsg to the requesting contract.
+    /// The requesting contract must hanlde the `ReceiveGateMsg(GateMsg::QueryResponse)` in its `ExecuteMsg` variant.
     Query {
         queries: Vec<QueryRequest<Empty>>,
         callback_msg: Option<Binary>,
