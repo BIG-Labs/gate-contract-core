@@ -2,9 +2,9 @@ use std::str::FromStr;
 
 use cosmwasm_std::{
     from_binary, testing::mock_info, to_binary, Addr, BankMsg, Binary, Coin, ContractInfoResponse,
-    CosmosMsg, Decimal, IbcEndpoint, IbcMsg, IbcPacket, IbcPacketReceiveMsg, IbcPacketTimeoutMsg,
-    IbcTimeout, IbcTimeoutBlock, QueryRequest, Reply, ReplyOn, Response, SubMsg, SubMsgResponse,
-    SubMsgResult, Uint128, WasmMsg, WasmQuery,
+    CosmosMsg, Decimal, IbcAcknowledgement, IbcEndpoint, IbcMsg, IbcPacket, IbcPacketAckMsg,
+    IbcPacketReceiveMsg, IbcPacketTimeoutMsg, IbcTimeout, IbcTimeoutBlock, QueryRequest, Reply,
+    ReplyOn, Response, SubMsg, SubMsgResponse, SubMsgResult, Uint128, WasmMsg, WasmQuery,
 };
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 use gate_pkg::{
@@ -21,10 +21,10 @@ use crate::{
     error::ContractError,
     extra::msg_transfer::MsgTransfer,
     functions::merge_fee,
-    ibc::{ibc_packet_receive, ibc_packet_timeout},
+    ibc::{ibc_packet_ack, ibc_packet_receive, ibc_packet_timeout},
     state::{
         Cw20MsgType, ForwardField, GateAck, GateAckType, GatePacket, IBCLifecycleComplete,
-        MemoField, ReplyID, SudoMsg, WasmField,
+        MemoField, PacketSavedKey, ReplyID, RequestsPacket, SudoMsg, WasmField,
     },
     tests::{
         mock_querier::QueryMsgOracle,
@@ -247,11 +247,14 @@ fn send_single_msg_request_no_native_with_fee() {
         timeout: _,
     }) = res.messages.first().unwrap().clone().msg
     {
-        let packet: GatePacket = from_binary(&data).unwrap();
+        let packet = from_binary::<GatePacket>(&data)
+            .unwrap()
+            .as_request_packet()
+            .unwrap();
 
         assert_eq!(
             packet,
-            GatePacket {
+            RequestsPacket {
                 requests_infos: vec![GateRequestsInfo::new(
                     vec![GateRequest::SendMsg {
                         msg: Binary::default(),
@@ -527,7 +530,7 @@ fn collect_msgs() {
 
         assert_eq!(
             packet,
-            GatePacket {
+            GatePacket::RequestPacket(Box::new(RequestsPacket {
                 from_chain: None,
                 to_chain: REMOTE_CHAIN.to_string(),
                 fee: total_fee,
@@ -548,17 +551,17 @@ fn collect_msgs() {
                     .unwrap()
                 ],
                 send_native: merge_send_native(&send_native_1, &send_native_2).unwrap()
-            }
+            }))
         )
     }
 }
 
 #[test]
-fn timeout() {
+fn timeout_no_native() {
     let (mut deps, env) = initialize_gate().unwrap();
 
     let packet = IbcPacket::new(
-        to_binary(&GatePacket {
+        to_binary(&GatePacket::RequestPacket(Box::new(RequestsPacket {
             requests_infos: vec![GateRequestsInfo::new(
                 vec![GateRequest::SendMsg {
                     msg: Binary::default(),
@@ -574,7 +577,7 @@ fn timeout() {
             send_native: None,
             from_chain: None,
             to_chain: LOCAL_CHAIN.to_string(),
-        })
+        })))
         .unwrap(),
         IbcEndpoint {
             port_id: get_wasm_port_id(REMOTE_CONTRACT),
@@ -619,6 +622,160 @@ fn timeout() {
     )
 }
 
+#[test]
+fn msg_transfer_fails_on_reply() {
+    let (mut deps, mut env) = initialize_gate().unwrap();
+
+    env.block.height = 200;
+
+    // Trigger ibc_packet_ack
+
+    let transfer_channel = "channel-123".to_string();
+    let dest_denom = "ibc/uosmo".to_string();
+    let transfer_denom = "uomso".to_string();
+    let timeout_send_native = Some(123_123_123_u64);
+
+    let dest_key = PacketSavedKey {
+        channel: REMOTE_CHANNEL.to_string(),
+        sequence: 1,
+    };
+
+    let send_native = Some(SendNativeInfo {
+        coin: Coin {
+            denom: transfer_denom,
+            amount: Uint128::from(100_u128),
+        },
+        path_middle_forward: vec![],
+        dest_denom,
+        channel_id: transfer_channel,
+        timeout: timeout_send_native,
+    });
+
+    let packet = RequestsPacket {
+        from_chain: Some(LOCAL_CHAIN.to_string()),
+        to_chain: REMOTE_CHAIN.to_string(),
+        requests_infos: vec![],
+        fee: None,
+        send_native,
+    };
+
+    let ibc_packet = IbcPacket::new(
+        to_binary(&GatePacket::RequestPacket(Box::new(packet.clone()))).unwrap(),
+        IbcEndpoint {
+            port_id: get_wasm_port_id(REMOTE_CONTRACT),
+            channel_id: REMOTE_CHANNEL.to_string(),
+        },
+        IbcEndpoint {
+            port_id: get_wasm_port_id(LOCAL_CONTRACT),
+            channel_id: LOCAL_CHANNEL.to_string(),
+        },
+        1_u64,
+        IbcTimeout::with_block(IbcTimeoutBlock {
+            revision: 1_u64,
+            height: 1_u64,
+        }),
+    );
+
+    let msg = IbcPacketAckMsg::new(
+        IbcAcknowledgement::new(
+            to_binary(&GateAck {
+                coin: None,
+                ack: GateAckType::NativeSendRequest {
+                    dest_key,
+                    gate_packet: Box::new(packet),
+                },
+            })
+            .unwrap(),
+        ),
+        ibc_packet,
+        Addr::unchecked(LOCAL_RELAYER),
+    );
+
+    ibc_packet_ack(deps.as_mut(), env.clone(), msg.clone()).unwrap();
+
+    // Trigger Reply
+
+    let msg_reply = Reply {
+        id: ReplyID::SendIbcHookPacket.repr(),
+        result: SubMsgResult::Err("random_err".to_string()),
+    };
+
+    let res = reply(deps.as_mut(), env.clone(), msg_reply.clone()).unwrap();
+
+    if let CosmosMsg::Ibc(IbcMsg::SendPacket { data, .. }) =
+        res.messages.first().unwrap().clone().msg
+    {
+        let packet: GatePacket = from_binary(&data).unwrap();
+
+        if let GatePacket::RemoveStoredPacket { src_key, .. } = packet {
+            assert_eq!(
+                src_key,
+                PacketSavedKey {
+                    channel: env.block.height.to_string(),
+                    sequence: 0
+                }
+            )
+        } else {
+            panic!("wrong packet type")
+        }
+    } else {
+        panic!("wrong msg type")
+    }
+
+    // Another fails on reply on the same block
+
+    ibc_packet_ack(deps.as_mut(), env.clone(), msg.clone()).unwrap();
+
+    let res = reply(deps.as_mut(), env.clone(), msg_reply.clone()).unwrap();
+
+    if let CosmosMsg::Ibc(IbcMsg::SendPacket { data, .. }) =
+        res.messages.first().unwrap().clone().msg
+    {
+        let packet: GatePacket = from_binary(&data).unwrap();
+
+        if let GatePacket::RemoveStoredPacket { src_key, .. } = packet {
+            assert_eq!(
+                src_key,
+                PacketSavedKey {
+                    channel: env.block.height.to_string(),
+                    sequence: 1
+                }
+            )
+        } else {
+            panic!("wrong packet type")
+        }
+    } else {
+        panic!("wrong msg type")
+    }
+
+    // Another fails on reply on another block same block
+    env.block.height = 201;
+
+    ibc_packet_ack(deps.as_mut(), env.clone(), msg).unwrap();
+
+    let res = reply(deps.as_mut(), env.clone(), msg_reply).unwrap();
+
+    if let CosmosMsg::Ibc(IbcMsg::SendPacket { data, .. }) =
+        res.messages.first().unwrap().clone().msg
+    {
+        let packet: GatePacket = from_binary(&data).unwrap();
+
+        if let GatePacket::RemoveStoredPacket { src_key, .. } = packet {
+            assert_eq!(
+                src_key,
+                PacketSavedKey {
+                    channel: env.block.height.to_string(),
+                    sequence: 0
+                }
+            )
+        } else {
+            panic!("wrong packet type")
+        }
+    } else {
+        panic!("wrong msg type")
+    }
+}
+
 // --- DEST CHAIN ---
 
 #[test]
@@ -634,7 +791,7 @@ fn receive_single_msg_request_no_native_ok_with_fee() {
 
     let ibc_packet = IbcPacketReceiveMsg::new(
         IbcPacket::new(
-            to_binary(&GatePacket {
+            to_binary(&GatePacket::RequestPacket(Box::new(RequestsPacket {
                 requests_infos: vec![GateRequestsInfo::new(
                     vec![GateRequest::SendMsg {
                         msg: Binary::default(),
@@ -650,7 +807,7 @@ fn receive_single_msg_request_no_native_ok_with_fee() {
                 send_native: None,
                 from_chain: None,
                 to_chain: LOCAL_CHAIN.to_string(),
-            })
+            })))
             .unwrap(),
             IbcEndpoint {
                 port_id: get_wasm_port_id(REMOTE_CONTRACT),
@@ -772,7 +929,7 @@ fn receive_single_msg_request_no_native_err() {
 
     let ibc_packet = IbcPacketReceiveMsg::new(
         IbcPacket::new(
-            to_binary(&GatePacket {
+            to_binary(&GatePacket::RequestPacket(Box::new(RequestsPacket {
                 requests_infos: vec![GateRequestsInfo::new(
                     vec![GateRequest::SendMsg {
                         msg: Binary::default(),
@@ -788,7 +945,7 @@ fn receive_single_msg_request_no_native_err() {
                 send_native: None,
                 from_chain: None,
                 to_chain: LOCAL_CHAIN.to_string(),
-            })
+            })))
             .unwrap(),
             IbcEndpoint {
                 port_id: get_wasm_port_id("HACK_CONTRACT"),
@@ -825,7 +982,7 @@ fn receive_single_msg_request_no_native_err() {
 
     let ibc_packet = IbcPacketReceiveMsg::new(
         IbcPacket::new(
-            to_binary(&GatePacket {
+            to_binary(&GatePacket::RequestPacket(Box::new(RequestsPacket {
                 requests_infos: vec![GateRequestsInfo::new(
                     vec![GateRequest::SendMsg {
                         msg: Binary::default(),
@@ -841,7 +998,7 @@ fn receive_single_msg_request_no_native_err() {
                 send_native: None,
                 from_chain: None,
                 to_chain: LOCAL_CHAIN.to_string(),
-            })
+            })))
             .unwrap(),
             IbcEndpoint {
                 port_id: get_wasm_port_id(REMOTE_CONTRACT),
@@ -903,7 +1060,7 @@ fn receive_single_query_request() {
 
     let msg = IbcPacketReceiveMsg::new(
         IbcPacket::new(
-            to_binary(&GatePacket {
+            to_binary(&GatePacket::RequestPacket(Box::new(RequestsPacket {
                 requests_infos: vec![GateRequestsInfo::new(
                     vec![GateRequest::Query {
                         queries: vec![QueryRequest::Wasm(WasmQuery::Smart {
@@ -924,7 +1081,7 @@ fn receive_single_query_request() {
                 send_native: None,
                 from_chain: None,
                 to_chain: LOCAL_CHAIN.to_string(),
-            })
+            })))
             .unwrap(),
             IbcEndpoint {
                 port_id: get_wasm_port_id(REMOTE_GATE),
@@ -1082,7 +1239,7 @@ fn interchain() {
             msg: CosmosMsg::Ibc(IbcMsg::SendPacket {
                 channel_id: LOCAL_CHANNEL.to_string(),
                 timeout: gate_timeout(None),
-                data: to_binary(&GatePacket {
+                data: to_binary(&GatePacket::RequestPacket(Box::new(RequestsPacket {
                     from_chain: None,
                     to_chain: REMOTE_CHAIN.to_string(),
                     requests_infos: vec![GateRequestsInfo::new(
@@ -1098,7 +1255,7 @@ fn interchain() {
                     .unwrap()],
                     fee: halving_fee(&fee),
                     send_native: send_native.clone()
-                })
+                })))
                 .unwrap()
             })
         })
@@ -1110,7 +1267,7 @@ fn interchain() {
         msg_response[2].0,
         SubMsgType::PacketReceive(IbcPacketReceiveMsg::new(
             IbcPacket::new(
-                to_binary(&GatePacket {
+                to_binary(&GatePacket::RequestPacket(Box::new(RequestsPacket {
                     requests_infos: vec![GateRequestsInfo::new(
                         vec![GateRequest::SendMsg {
                             msg: msg_to_send.clone(),
@@ -1126,7 +1283,7 @@ fn interchain() {
                     send_native: send_native.clone(),
                     from_chain: None,
                     to_chain: REMOTE_CHAIN.to_string(),
-                })
+                })))
                 .unwrap(),
                 IbcEndpoint {
                     port_id: get_wasm_port_id(LOCAL_GATE),
@@ -1372,7 +1529,7 @@ fn interchain_with_native() {
             msg: CosmosMsg::Ibc(IbcMsg::SendPacket {
                 channel_id: LOCAL_CHANNEL.to_string(),
                 timeout: gate_timeout(None),
-                data: to_binary(&GatePacket {
+                data: to_binary(&GatePacket::RequestPacket(Box::new(RequestsPacket {
                     from_chain: None,
                     to_chain: REMOTE_CHAIN.to_string(),
                     requests_infos: vec![GateRequestsInfo::new(
@@ -1388,7 +1545,7 @@ fn interchain_with_native() {
                     .unwrap()],
                     fee: halving_fee(&fee),
                     send_native: send_native.clone()
-                })
+                })))
                 .unwrap()
             })
         })
@@ -1400,7 +1557,7 @@ fn interchain_with_native() {
         msg_response[2].0,
         SubMsgType::PacketReceive(IbcPacketReceiveMsg::new(
             IbcPacket::new(
-                to_binary(&GatePacket {
+                to_binary(&GatePacket::RequestPacket(Box::new(RequestsPacket {
                     requests_infos: vec![GateRequestsInfo::new(
                         vec![GateRequest::SendMsg {
                             msg: msg_to_send.clone(),
@@ -1416,7 +1573,7 @@ fn interchain_with_native() {
                     send_native: send_native.clone(),
                     from_chain: None,
                     to_chain: REMOTE_CHAIN.to_string(),
-                })
+                })))
                 .unwrap(),
                 IbcEndpoint {
                     port_id: get_wasm_port_id(LOCAL_GATE),
@@ -1460,9 +1617,11 @@ fn interchain_with_native() {
         SubMsgType::GateAck(GateAck {
             coin: halving_fee(&fee),
             ack: GateAckType::NativeSendRequest {
-                sequence: 0,
-                channel: REMOTE_CHANNEL.to_string(),
-                gate_packet: Box::new(GatePacket {
+                dest_key: PacketSavedKey {
+                    sequence: 0,
+                    channel: REMOTE_CHANNEL.to_string()
+                },
+                gate_packet: Box::new(RequestsPacket {
                     requests_infos: vec![GateRequestsInfo::new(
                         vec![GateRequest::SendMsg {
                             msg: msg_to_send.clone(),
@@ -2072,7 +2231,7 @@ fn interchain_fails_with_native() {
         },
         path_middle_forward: vec![],
         dest_denom,
-        channel_id: transfer_channel,
+        channel_id: transfer_channel.clone(),
         timeout: None,
     });
 
@@ -2109,6 +2268,48 @@ fn interchain_fails_with_native() {
     } else {
         panic!("Should be SubMsgType::SubMsg(SubMsg...")
     }
+
+    // CHECK IF A PACKET HAS BEEN SENT TO THE DEST CHAIN TO REMOVE THE STORED PACKET
+
+    assert_eq!(
+        msgs[msgs.len() - 6].0,
+        SubMsgType::SubMsg(SubMsg {
+            id: 0,
+            gas_limit: None,
+            reply_on: ReplyOn::Never,
+            msg: CosmosMsg::Ibc(IbcMsg::SendPacket {
+                channel_id: LOCAL_CHANNEL.to_string(),
+                timeout: gate_timeout(None),
+                data: to_binary(&GatePacket::RemoveStoredPacket {
+                    dest_key: PacketSavedKey {
+                        channel: REMOTE_CHANNEL.to_string(),
+                        sequence: 0
+                    },
+                    src_key: PacketSavedKey {
+                        channel: transfer_channel.to_string(),
+                        sequence: 0
+                    }
+                })
+                .unwrap()
+            })
+        })
+    );
+
+    // CHECK IF IN THE ACK IS SETTED THAT THE PACKET HAS BEEN REMOVED FROM THE STATE
+
+    assert_eq!(
+        msgs[msgs.len() - 4].0,
+        SubMsgType::GateAck(GateAck {
+            coin: None,
+            ack: GateAckType::RemoveStoredPacket {
+                src_key: PacketSavedKey {
+                    channel: transfer_channel,
+                    sequence: 0
+                },
+                removed: true
+            }
+        })
+    );
 
     // CHECK IF REVERT MSG HAS BEEN SENT WITH NATIVE TOKEN ON FIRST REQUEST
 

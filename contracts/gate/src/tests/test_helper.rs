@@ -12,7 +12,7 @@ use cosmwasm_std::{
     Event, IbcAcknowledgement, IbcBasicResponse, IbcChannel, IbcChannelConnectMsg, IbcEndpoint,
     IbcMsg, IbcOrder, IbcPacket, IbcPacketAckMsg, IbcPacketReceiveMsg, IbcReceiveResponse,
     IbcTimeout, MemoryStorage, MessageInfo, Never, OwnedDeps, Reply, ReplyOn, Response, StdResult,
-    SubMsg, SubMsgResponse, SubMsgResult, Timestamp, Uint128, WasmMsg,
+    Storage, SubMsg, SubMsgResponse, SubMsgResult, Timestamp, Uint128, WasmMsg,
 };
 use gate_pkg::{
     ExecuteMsg, GateMsg, GateRequest, IbcHookMsg, Permission, ReceiverExecuteMsg, SendNativeInfo,
@@ -224,6 +224,15 @@ pub fn create_msg_transfer_reponse_encoded(sequence: u64) -> Binary {
 }
 
 // --- MANAGER ---
+
+fn clone_storage(memory_storage: &MemoryStorage) -> MemoryStorage {
+    let mut res = MemoryStorage::new();
+
+    for (k, v) in memory_storage.range(None, None, cosmwasm_std::Order::Descending) {
+        res.set(&k, &v)
+    }
+    res
+}
 
 pub struct GatesManager {
     local_deps: OwnedDeps<MemoryStorage, MockApi, WasmMockQuerier>,
@@ -514,10 +523,16 @@ impl GatesManager {
     ) -> ResponseManager {
         let mut manager = ResponseManager::new(msg_response.clone());
 
+        let c_local = clone_storage(&self.local_deps.storage);
+        let c_remote = clone_storage(&self.remote_deps.storage);
+
         for sub_msg in msg_response.response.msgs() {
             let next_manager = self.handle_msg(next_sender.clone(), sub_msg, next_local);
             manager.merge_next_lvl(next_manager);
             if manager.next_unhandled_error().is_some() {
+                self.local_deps.storage = c_local;
+                self.remote_deps.storage = c_remote;
+
                 return manager;
             }
         }

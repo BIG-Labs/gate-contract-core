@@ -30,4 +30,4 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ${{ steps.coverage.outputs.report }}
-          path_to_write_report: ./coverage/codecov_report.txt
+          # path_to_write_report: ./coverage/codecov_report.txt

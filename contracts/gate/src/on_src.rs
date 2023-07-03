@@ -24,9 +24,10 @@ use crate::{
     },
     state::{
         Cw20MsgType, ForwardField, GateAck, GateAckType, GatePacket, GatePacketInfo, MemoField,
-        RegisteringVoucherChain, ReplyID, WasmField, BUFFER_PACKETS, CHAIN_REGISTERED_CHANNELS,
-        CHANNEL_INFO, CONIFG, IS_REGISTERING, PACKET_IBC_HOOK_AWAITING_ACK,
-        PACKET_IBC_HOOK_AWAITING_REPLY, REGISTERED_CONTRACTS, VOUCHER_REGISTERING_CHAIN,
+        PacketSavedKey, RegisteringVoucherChain, ReplyID, RequestsPacket, WasmField,
+        BUFFER_PACKETS, CHAIN_REGISTERED_CHANNELS, CHANNEL_INFO, CONIFG, IS_REGISTERING,
+        LAST_FAILED_KEY_GENERATED, PACKET_IBC_HOOK_AWAITING_ACK, PACKET_IBC_HOOK_AWAITING_REPLY,
+        REGISTERED_CONTRACTS, VOUCHER_REGISTERING_CHAIN,
     },
 };
 
@@ -70,7 +71,7 @@ pub fn run_handle_requests(
         send_packet(
             deps,
             env,
-            GatePacket {
+            RequestsPacket {
                 requests_infos: vec![requests_info.clone()],
                 fee: requests_info.fee,
                 send_native: requests_info.send_native,
@@ -335,14 +336,15 @@ pub fn reply_init_token(
 /// Reply when we send a ics20 transfer packer
 pub fn reply_send_ibc_packet(
     deps: DepsMut,
+    env: Env,
     result: SubMsgResult,
 ) -> Result<Response, ContractError> {
     match result {
         SubMsgResult::Ok(response) => Ok(reply_send_ibc_packet_ok(deps.storage, response)
             .unwrap_or_else(|err| {
-                reply_send_ibc_packet_err(deps.storage, err.to_string()).unwrap()
+                reply_send_ibc_packet_err(deps.storage, env, err.to_string()).unwrap()
             })),
-        SubMsgResult::Err(err) => reply_send_ibc_packet_err(deps.storage, err),
+        SubMsgResult::Err(err) => reply_send_ibc_packet_err(deps.storage, env, err),
     }
 }
 
@@ -359,11 +361,15 @@ fn reply_send_ibc_packet_ok(
     let response = MsgTransferResponse::decode(&data[..])
         .map_err(|_| StdError::generic_err(format!("could not decode response: {data}")))?;
 
-    let packet = PACKET_IBC_HOOK_AWAITING_REPLY.load(storage)?;
+    let (packet, dest_key) = PACKET_IBC_HOOK_AWAITING_REPLY.load(storage)?;
 
     let channel = packet.send_native.clone().unwrap().get_first_channel();
 
-    PACKET_IBC_HOOK_AWAITING_ACK.save(storage, (channel.clone(), response.sequence), &packet)?;
+    PACKET_IBC_HOOK_AWAITING_ACK.save(
+        storage,
+        (channel.clone(), response.sequence),
+        &(packet, dest_key),
+    )?;
 
     Ok(Response::new()
         .add_attribute("action", "ics-20 packet stored")
@@ -372,13 +378,46 @@ fn reply_send_ibc_packet_ok(
 }
 
 /// Err Reply when we send a ics20 transfer packer.
-/// The contract revert all the `Requests`
+/// THIS SHOULDN'T NEVER HAPPEN.
+/// Proceed like when the contract receive the sudo_ack as failed, requesting the cancellation of the packet on destination chain
 fn reply_send_ibc_packet_err(
     storage: &mut dyn Storage,
-    _err: String,
+    env: Env,
+    err: String,
 ) -> Result<Response, ContractError> {
-    let packet = PACKET_IBC_HOOK_AWAITING_REPLY.load(storage)?;
-    Ok(Response::new().add_submessages(create_revert_sub_msgs(storage, packet)?))
+    let (packet, dest_key) = PACKET_IBC_HOOK_AWAITING_REPLY.load(storage)?;
+
+    // Save the packet creating a unique key since the packet is failed before the assignment of a channel-id sequence
+    let src_key = create_unique_src_key(storage, &env)?;
+
+    PACKET_IBC_HOOK_AWAITING_ACK.save(
+        storage,
+        (src_key.channel.clone(), src_key.sequence),
+        &(packet.clone(), dest_key.clone()),
+    )?;
+
+    let ibc_msg = IbcMsg::SendPacket {
+        channel_id: get_channel_from_chain(storage, &packet.to_chain)?,
+        data: to_binary(&GatePacket::RemoveStoredPacket {
+            dest_key: dest_key.clone(),
+            src_key: src_key.clone(),
+        })?,
+        timeout: env
+            .block
+            .time
+            .plus_seconds(CONIFG.load(storage)?.default_timeout)
+            .into(),
+    };
+
+    Ok(Response::new()
+        .add_message(ibc_msg)
+        .add_attribute("action", "reply_send_ibc_packet_err")
+        .add_attribute("error", err)
+        .add_attribute("next_action", "remove_stored_packet")
+        .add_attribute("key_src_channel", src_key.channel)
+        .add_attribute("key_src_sequence", src_key.sequence.to_string())
+        .add_attribute("key_dest_channel", dest_key.channel)
+        .add_attribute("key_dest_sequence", dest_key.sequence.to_string()))
 }
 
 // --- ACK ---
@@ -393,15 +432,21 @@ pub fn run_on_ack_receive(
 
     let mut res = match gate_ack.ack {
         GateAckType::EmptyResult => on_ack_empty_result(),
-        GateAckType::Error(err) => {
-            on_ack_error(deps.storage, from_binary(&msg.original_packet.data)?, err)
-        }
+        GateAckType::Error(err) => on_ack_error(
+            deps.storage,
+            from_binary::<GatePacket>(&msg.original_packet.data)?
+                .as_request_packet()
+                .unwrap(),
+            err,
+        ),
         GateAckType::QueryResult(queries_response) => on_ack_query_result(queries_response),
         GateAckType::NativeSendRequest {
-            sequence,
-            channel,
+            dest_key,
             gate_packet,
-        } => on_ack_native_send_request(deps.storage, env, sequence, channel, *gate_packet),
+        } => on_ack_native_send_request(deps.storage, env, dest_key, *gate_packet),
+        GateAckType::RemoveStoredPacket { src_key, removed } => {
+            on_ack_remove_store_packet(deps.storage, src_key, removed)
+        }
     }?;
 
     if let Some(coin) = gate_ack.coin {
@@ -426,23 +471,42 @@ pub fn run_on_ack_receive(
     Ok(res)
 }
 
-/// Packet timeout, revert the `Requests`.
-/// see `on_ack_error
+/// Packet timeout, if:
+/// - `GatePacket::RequestPacket` => Revert the request (see `on_ack_error`).
+/// - `GatePacket::RemoveStoredPacket` => Resend the packet (see `sudo_on_ack_failed`)
 pub fn run_on_ack_timeout(
-    storage: &mut dyn Storage,
+    deps: DepsMut,
+    env: Env,
     msg: IbcPacketTimeoutMsg,
 ) -> Result<IbcBasicResponse, ContractError> {
-    on_ack_error(
-        storage,
-        from_binary(&msg.packet.data).unwrap(),
-        "timeout".to_string(),
-    )
+    match from_binary::<GatePacket>(&msg.packet.data)? {
+        GatePacket::RequestPacket(packet) => {
+            on_ack_error(deps.storage, *packet, "timeout".to_string())
+        }
+
+        // Retry to send a packet to remove the stored packet
+        GatePacket::RemoveStoredPacket { src_key, .. } => Ok(IbcBasicResponse::new()
+            .add_submessages(
+                sudo_on_ack_failed(
+                    deps,
+                    env,
+                    src_key.channel,
+                    src_key.sequence,
+                    "timeout".to_string(),
+                )
+                .unwrap()
+                .messages,
+            )
+            .add_attribute("action", "acknowledge")
+            .add_attribute("success", "false")
+            .add_attribute("error", "timeout")),
+    }
 }
 
 /// `Ok`, nothing to do
 fn on_ack_empty_result() -> Result<IbcBasicResponse, ContractError> {
     Ok(IbcBasicResponse::new()
-        .add_attribute("action", "acknowledge")
+        .add_attribute("action", "on_ack_empty_result")
         .add_attribute("state", "success")
         .add_attribute("ack_type", "empty_result"))
 }
@@ -451,7 +515,7 @@ fn on_ack_empty_result() -> Result<IbcBasicResponse, ContractError> {
 /// Send a `RequestFailed` to the sender contract.
 fn on_ack_error(
     storage: &mut dyn Storage,
-    packet: GatePacket,
+    packet: RequestsPacket,
     err: String,
 ) -> Result<IbcBasicResponse, ContractError> {
     let sub_msgs = create_revert_sub_msgs(storage, packet)?;
@@ -495,9 +559,8 @@ fn on_ack_query_result(
 fn on_ack_native_send_request(
     storage: &mut dyn Storage,
     env: Env,
-    sequence: u64,
-    channel: String,
-    gate_packet: GatePacket,
+    dest_key: PacketSavedKey,
+    gate_packet: RequestsPacket,
 ) -> Result<IbcBasicResponse, ContractError> {
     let mut forward: Option<ForwardField<ExecuteMsg>> = None;
 
@@ -507,7 +570,10 @@ fn on_ack_native_send_request(
 
     let wasm_field = Some(WasmField {
         contract: remote_gate_contract.clone(),
-        msg: ExecuteMsg::IbcHook(IbcHookMsg::ExecutePendingRequest { channel, sequence }),
+        msg: ExecuteMsg::IbcHook(IbcHookMsg::ExecutePendingRequest {
+            channel: dest_key.channel.clone(),
+            sequence: dest_key.sequence,
+        }),
     });
 
     let (memo, channel, receiver) = if !send_native_info.path_middle_forward.is_empty() {
@@ -597,10 +663,40 @@ fn on_ack_native_send_request(
         memo: to_string_pretty(&memo).unwrap(),
     };
 
-    PACKET_IBC_HOOK_AWAITING_REPLY.save(storage, &gate_packet)?;
+    PACKET_IBC_HOOK_AWAITING_REPLY.save(storage, &(gate_packet, dest_key))?;
 
     Ok(IbcBasicResponse::new()
         .add_submessage(SubMsg::reply_always(msg, ReplyID::SendIbcHookPacket.repr())))
+}
+
+/// Ack of packet that should remove a stored packet on destination chain.
+/// If the packet:
+/// - has been removed: The contract will send a RevertRequest to every contract that have sent a request.
+/// - has **NOT** been removed: Someone else manually triggered the packet on destination chain. Since the request has been executed, we don't need to revert.
+fn on_ack_remove_store_packet(
+    storage: &mut dyn Storage,
+    src_key: PacketSavedKey,
+    removed: bool,
+) -> Result<IbcBasicResponse, ContractError> {
+    match removed {
+        true => {
+            let packet = PACKET_IBC_HOOK_AWAITING_ACK
+                .load(storage, (src_key.channel.clone(), src_key.sequence))?
+                .0;
+
+            let sub_msgs = create_revert_sub_msgs(storage, packet)?;
+
+            PACKET_IBC_HOOK_AWAITING_ACK.remove(storage, (src_key.channel, src_key.sequence));
+
+            Ok(IbcBasicResponse::new()
+                .add_submessages(sub_msgs)
+                .add_attribute("action", "on_ack_remove_store_packet")
+                .add_attribute("removed", "true"))
+        }
+        false => Ok(IbcBasicResponse::new()
+            .add_attribute("action", "on_ack_remove_store_packet")
+            .add_attribute("removed", "false")),
+    }
 }
 
 // --- SUDO ---
@@ -618,30 +714,52 @@ pub fn sudo_ack_ok(
 }
 
 /// `Err` on `ibc_callback` of ics-20 transfer packet.
-/// Send a `RequestFailed` to the sender contract (equal to on_ack_error).
+/// Send a gate packet to dest in order to remove the saved packet before revert.
+/// This because the contract, before revert, must be sure that the packet has not been executed during the reverting
 pub fn sudo_on_ack_failed(
     deps: DepsMut,
+    env: Env,
     channel: String,
     sequence: u64,
     err: String,
 ) -> Result<Response, ContractError> {
-    let packet = PACKET_IBC_HOOK_AWAITING_ACK.load(deps.storage, (channel.clone(), sequence))?;
+    let (packet, dest_key) =
+        PACKET_IBC_HOOK_AWAITING_ACK.load(deps.storage, (channel.clone(), sequence))?;
 
-    let sub_msgs = create_revert_sub_msgs(deps.storage, packet)?;
-
-    PACKET_IBC_HOOK_AWAITING_ACK.remove(deps.storage, (channel, sequence));
+    let ibc_msg = IbcMsg::SendPacket {
+        channel_id: get_channel_from_chain(deps.storage, &packet.to_chain)?,
+        data: to_binary(&GatePacket::RemoveStoredPacket {
+            dest_key: dest_key.clone(),
+            src_key: PacketSavedKey {
+                channel: channel.clone(),
+                sequence,
+            },
+        })?,
+        timeout: env
+            .block
+            .time
+            .plus_seconds(CONIFG.load(deps.storage)?.default_timeout)
+            .into(),
+    };
 
     Ok(Response::new()
-        .add_submessages(sub_msgs)
-        .add_attribute("action", "ibc_hook_ack")
-        .add_attribute("success", "false")
-        .add_attribute("error", err))
+        .add_message(ibc_msg)
+        .add_attribute("action", "sudo_on_ack_failed")
+        .add_attribute("error", err)
+        .add_attribute("next_action", "remove_stored_packet")
+        .add_attribute("key_src_channel", channel)
+        .add_attribute("key_src_sequence", sequence.to_string())
+        .add_attribute("key_dest_channel", dest_key.channel)
+        .add_attribute("key_dest_sequence", dest_key.sequence.to_string()))
 }
 
 // --- FUNCTIONS ---
 
 /// Create a list of `RequestFailed`
-fn create_revert_sub_msgs(storage: &mut dyn Storage, packet: GatePacket) -> StdResult<Vec<SubMsg>> {
+fn create_revert_sub_msgs(
+    storage: &mut dyn Storage,
+    packet: RequestsPacket,
+) -> StdResult<Vec<SubMsg>> {
     let mut sub_msgs: Vec<SubMsg> = vec![];
 
     let max_gas_amount = CONIFG.load(storage)?.max_gas_amount_per_revert;
@@ -726,7 +844,7 @@ fn save_permission(
 fn send_packet(
     deps: DepsMut,
     env: Env,
-    mut packet: GatePacket,
+    mut packet: RequestsPacket,
     timeout: Option<u64>,
 ) -> Result<Response, ContractError> {
     let channel = get_channel_from_chain(deps.storage, &packet.to_chain)?;
@@ -754,7 +872,7 @@ fn send_packet(
     // prepare ibc message
     let ibc_msg = IbcMsg::SendPacket {
         channel_id: channel,
-        data: to_binary(&packet)?,
+        data: to_binary(&GatePacket::RequestPacket(Box::new(packet.clone())))?,
         timeout: timeout.into(),
     };
 
@@ -794,7 +912,7 @@ fn store_request_info(
             Ok(Some(info))
         }
         None => Ok(Some(GatePacketInfo {
-            packet: GatePacket {
+            packet: RequestsPacket {
                 requests_infos: vec![request_info.clone()],
                 fee: request_info.fee,
                 send_native: request_info.send_native,
@@ -808,4 +926,23 @@ fn store_request_info(
     let res = Response::new().add_attribute("action", "store_packet");
 
     Ok(res)
+}
+
+/// In case the `MsgTransfer` fails on Reply (this should never happen), create a unique key to store the packet.
+fn create_unique_src_key(storage: &mut dyn Storage, env: &Env) -> StdResult<PacketSavedKey> {
+    let (mut height, mut idx) = LAST_FAILED_KEY_GENERATED.load(storage)?;
+
+    if env.block.height != height {
+        height = env.block.height;
+        idx = 0;
+    } else {
+        idx += 1;
+    }
+
+    LAST_FAILED_KEY_GENERATED.save(storage, &(height, idx))?;
+
+    Ok(PacketSavedKey {
+        channel: height.to_string(),
+        sequence: idx,
+    })
 }

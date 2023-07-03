@@ -1,5 +1,5 @@
 use cosmwasm_schema::cw_serde;
-use cosmwasm_std::{Addr, Coin, IbcOrder};
+use cosmwasm_std::{Addr, Coin, IbcOrder, StdError, StdResult};
 use cw_storage_macro::index_list;
 use cw_storage_plus::{IndexedMap, Item, Map, MultiIndex};
 use enum_repr::EnumRepr;
@@ -21,11 +21,13 @@ pub const IS_REGISTERING: Item<bool> = Item::new("is_registering");
 
 pub const BUFFER_PACKETS: Item<Option<GatePacketInfo>> = Item::new("buffer_packets");
 
-pub const PENDING_PACKETS: Map<(String, u64), GatePacket> = Map::new("pending_packets");
+pub const PENDING_PACKETS: Map<(String, u64), RequestsPacket> = Map::new("pending_packets");
 
-pub const PACKET_IBC_HOOK_AWAITING_REPLY: Item<GatePacket> = Item::new("awaiting_packet_reply");
+pub const PACKET_IBC_HOOK_AWAITING_REPLY: Item<(RequestsPacket, PacketSavedKey)> =
+    Item::new("awaiting_packet_reply");
 
-pub const PACKET_IBC_HOOK_AWAITING_ACK: Map<(String, u64), GatePacket> = Map::new("on_ack_await");
+pub const PACKET_IBC_HOOK_AWAITING_ACK: Map<(String, u64), (RequestsPacket, PacketSavedKey)> =
+    Map::new("on_ack_await");
 
 pub const RECEIVED_FEE: Item<Option<Coin>> = Item::new("received_fee");
 
@@ -39,9 +41,17 @@ pub const ICG_VERSION: &str = "icg-1";
 
 pub const ICG_ORDERING: IbcOrder = IbcOrder::Unordered;
 
+pub const LAST_FAILED_KEY_GENERATED: Item<(u64, u64)> = Item::new("last_failed_key_generated");
+
 #[index_list(ChannelInfo)]
 pub struct ChannelInfoChannelIndexes<'a> {
     pub src_channel_dest_channel: MultiIndex<'a, String, ChannelInfo, String>,
+}
+
+#[cw_serde]
+pub struct PacketSavedKey {
+    pub channel: String,
+    pub sequence: u64,
 }
 
 #[allow(non_snake_case)]
@@ -116,16 +126,39 @@ pub enum GateAckType {
     QueryResult(Vec<QueryRequestInfoResponse>),
     Error(String),
     NativeSendRequest {
-        sequence: u64,
-        channel: String,
-        gate_packet: Box<GatePacket>,
+        dest_key: PacketSavedKey,
+        gate_packet: Box<RequestsPacket>,
+    },
+    RemoveStoredPacket {
+        src_key: PacketSavedKey,
+        removed: bool,
     },
 }
 
 // --- STRUCTURES ---
 
 #[cw_serde]
-pub struct GatePacket {
+pub enum GatePacket {
+    RequestPacket(Box<RequestsPacket>),
+    RemoveStoredPacket {
+        dest_key: PacketSavedKey,
+        src_key: PacketSavedKey,
+    },
+}
+
+impl GatePacket {
+    pub fn as_request_packet(&self) -> StdResult<RequestsPacket> {
+        match self {
+            GatePacket::RequestPacket(packet) => Ok(*packet.to_owned()),
+            _ => Err(StdError::generic_err(
+                "GatePacket is not RequestPacket type",
+            )),
+        }
+    }
+}
+
+#[cw_serde]
+pub struct RequestsPacket {
     pub from_chain: Option<String>,
     pub to_chain: String,
     pub requests_infos: Vec<GateRequestsInfo>,
@@ -135,7 +168,7 @@ pub struct GatePacket {
 
 #[cw_serde]
 pub struct GatePacketInfo {
-    pub packet: GatePacket,
+    pub packet: RequestsPacket,
     pub timeout: Option<u64>,
 }
 

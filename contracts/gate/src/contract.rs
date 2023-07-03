@@ -12,7 +12,8 @@ use crate::error::ContractError;
 use crate::queries::{qy_channel_info, qy_config, qy_permission};
 use crate::state::{
     IBCLifecycleComplete, InstantiateMsg, MigrateMsg, RegisteringVoucherChain, ReplyID, SudoMsg,
-    BUFFER_PACKETS, BUFFER_QUERIES_RESPONSE, CONIFG, IS_REGISTERING, VOUCHER_REGISTERING_CHAIN,
+    BUFFER_PACKETS, BUFFER_QUERIES_RESPONSE, CONIFG, IS_REGISTERING, LAST_FAILED_KEY_GENERATED,
+    VOUCHER_REGISTERING_CHAIN,
 };
 use crate::{on_dest, on_src};
 
@@ -42,6 +43,8 @@ pub fn instantiate(
     VOUCHER_REGISTERING_CHAIN.save(deps.storage, &Some(RegisteringVoucherChain::Local))?;
 
     BUFFER_QUERIES_RESPONSE.save(deps.storage, &vec![])?;
+
+    LAST_FAILED_KEY_GENERATED.save(deps.storage, &(env.block.height, 0))?;
 
     // Create voucher token
     let sub_msg = SubMsg::reply_on_success(
@@ -179,13 +182,13 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
         Some(ReplyID::AckContract) => on_src::reply_ack_contract(deps, reply.result),
         Some(ReplyID::InitToken) => on_src::reply_init_token(deps, env, reply.result),
         Some(ReplyID::MintVoucher) => Ok(Response::new()),
-        Some(ReplyID::SendIbcHookPacket) => on_src::reply_send_ibc_packet(deps, reply.result),
+        Some(ReplyID::SendIbcHookPacket) => on_src::reply_send_ibc_packet(deps, env, reply.result),
         None => Err(ContractError::InvalidIdReply { id: reply.id }),
     }
 }
 
 #[entry_point]
-pub fn sudo(deps: DepsMut, _env: Env, msg: SudoMsg) -> Result<Response, ContractError> {
+pub fn sudo(deps: DepsMut, env: Env, msg: SudoMsg) -> Result<Response, ContractError> {
     match msg {
         SudoMsg::IBCLifecycleComplete(ack) => match ack {
             IBCLifecycleComplete::IBCAck {
@@ -197,11 +200,11 @@ pub fn sudo(deps: DepsMut, _env: Env, msg: SudoMsg) -> Result<Response, Contract
                 if success {
                     on_src::sudo_ack_ok(deps, channel, sequence)
                 } else {
-                    on_src::sudo_on_ack_failed(deps, channel, sequence, ack)
+                    on_src::sudo_on_ack_failed(deps, env, channel, sequence, ack)
                 }
             }
             IBCLifecycleComplete::IBCTimeout { channel, sequence } => {
-                on_src::sudo_on_ack_failed(deps, channel, sequence, "timeout".to_string())
+                on_src::sudo_on_ack_failed(deps, env, channel, sequence, "timeout".to_string())
             }
         },
     }

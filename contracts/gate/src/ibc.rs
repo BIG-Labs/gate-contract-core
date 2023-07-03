@@ -97,10 +97,10 @@ pub fn ibc_packet_ack(
 /// Same case handled on `ibc_packet_ack` in `Error` scenario
 pub fn ibc_packet_timeout(
     deps: DepsMut,
-    _env: Env,
+    env: Env,
     msg: IbcPacketTimeoutMsg,
 ) -> Result<IbcBasicResponse, ContractError> {
-    on_src::run_on_ack_timeout(deps.storage, msg)
+    on_src::run_on_ack_timeout(deps, env, msg)
 }
 
 // --- FUNCTIONS ---

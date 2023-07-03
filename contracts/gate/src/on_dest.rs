@@ -1,7 +1,7 @@
 use cosmwasm_std::{
-    from_binary, to_binary, Addr, Attribute, Binary, Coin, ContractResult, CosmosMsg, DepsMut,
-    Empty, Env, IbcPacket, IbcReceiveResponse, QueryRequest, Response, StdResult, Storage, SubMsg,
-    SubMsgResult, SystemResult, WasmMsg,
+    attr, from_binary, to_binary, Addr, Attribute, Binary, Coin, ContractResult, CosmosMsg,
+    DepsMut, Empty, Env, IbcPacket, IbcReceiveResponse, QueryRequest, Response, StdResult, Storage,
+    SubMsg, SubMsgResult, SystemResult, WasmMsg,
 };
 use cw20::Cw20ExecuteMsg;
 use gate_pkg::{
@@ -15,57 +15,77 @@ use crate::{
         get_chain_and_channel_info_from_registered_channel, remote_contract_is_registered,
     },
     state::{
-        GateAck, GateAckType, GatePacket, ReplyID, BUFFER_QUERIES_RESPONSE, PENDING_PACKETS,
-        RECEIVED_FEE,
+        GateAck, GateAckType, GatePacket, PacketSavedKey, ReplyID, RequestsPacket,
+        BUFFER_QUERIES_RESPONSE, PENDING_PACKETS, RECEIVED_FEE,
     },
 };
 
 // --- RUN ---
 
-/// Packet received, gate execute all `Requests` or save the packet if `send_native` is present
+/// `GatePacket` received, based on `GatePacket` type:
+/// - `GatePacket::RequestPacket`: gate execute all `Requests` or save the packet if `send_native` is present.
+/// - `GatePacket::RemoveStoredPacket`: remove the stored key.
 pub fn run_ibc_packet_receive(
     storage: &mut dyn Storage,
     env: Env,
     ibc_packet: IbcPacket,
     relayer: Addr,
 ) -> Result<IbcReceiveResponse, ContractError> {
-    let mut gate_packet: GatePacket = from_binary(&ibc_packet.data)?;
-
     let (chain, channel_info) = get_chain_and_channel_info_from_registered_channel(
         storage,
         ibc_packet.dest.channel_id.clone(),
     )?;
 
-    gate_packet.from_chain = Some(chain);
+    match from_binary::<GatePacket>(&ibc_packet.data)? {
+        GatePacket::RequestPacket(packet) => handle_requests_packet(
+            storage,
+            env,
+            *packet,
+            chain,
+            ibc_packet,
+            channel_info.voucher_contract.unwrap(),
+            relayer,
+        ),
+        GatePacket::RemoveStoredPacket { dest_key, src_key } => {
+            handle_remove_stored_packet(storage, dest_key, src_key)
+        }
+    }
+}
 
-    let mut res: IbcReceiveResponse;
+/// Handle `GatePacket::RequestPacket`
+fn handle_requests_packet(
+    storage: &mut dyn Storage,
+    env: Env,
+    mut packet: RequestsPacket,
+    chain: String,
+    ibc_packet: IbcPacket,
+    voucher_contract: String,
+    relayer: Addr,
+) -> Result<IbcReceiveResponse, ContractError> {
+    packet.from_chain = Some(chain);
 
-    RECEIVED_FEE.save(storage, &gate_packet.fee)?;
+    RECEIVED_FEE.save(storage, &packet.fee)?;
 
-    if gate_packet.send_native.is_some() {
-        res = store_pending_gate_packet(
+    let mut res = if packet.send_native.is_some() {
+        store_pending_gate_packet(
             storage,
             ibc_packet.sequence,
             ibc_packet.dest.channel_id,
-            gate_packet.clone(),
-        )?;
+            packet.clone(),
+        )?
     } else {
-        res = IbcReceiveResponse::new()
-            .add_submessage(create_execute_packet_submsg(
-                env,
-                gate_packet.clone(),
-                false,
-            )?)
+        IbcReceiveResponse::new()
+            .add_submessage(create_execute_packet_submsg(env, packet.clone(), false)?)
             .add_attribute("action", "executed_gate_packet")
             .add_attribute("success", "true")
     };
 
-    if let Some(fee) = gate_packet.fee {
+    if let Some(fee) = packet.fee {
         res.messages.insert(
             0,
             SubMsg::reply_on_error(
                 CosmosMsg::Wasm(WasmMsg::Execute {
-                    contract_addr: channel_info.voucher_contract.unwrap(),
+                    contract_addr: voucher_contract,
                     msg: to_binary(&Cw20ExecuteMsg::Mint {
                         recipient: relayer.to_string(),
                         amount: fee.amount,
@@ -80,6 +100,28 @@ pub fn run_ibc_packet_receive(
     Ok(res)
 }
 
+/// Handle `GatePacket::RemoveStoredPacket`.
+/// Ack will be setted, specify if the packet has been found or not.
+fn handle_remove_stored_packet(
+    storage: &mut dyn Storage,
+    dest_key: PacketSavedKey,
+    src_key: PacketSavedKey,
+) -> Result<IbcReceiveResponse, ContractError> {
+    let (ack, removed) =
+        match PENDING_PACKETS.load(storage, (dest_key.channel.clone(), dest_key.sequence)) {
+            Ok(_) => {
+                PENDING_PACKETS.remove(storage, (dest_key.channel, dest_key.sequence));
+                (set_ack_packet_removed(src_key, true), true)
+            }
+            Err(_) => (set_ack_packet_removed(src_key, false), false),
+        };
+
+    Ok(IbcReceiveResponse::new().set_ack(ack).add_attributes(vec![
+        attr("action", "remove_stored_packet"),
+        attr("removed", removed.to_string()),
+    ]))
+}
+
 /// Create a `PrivateRemoteExecuteRequests` msg.
 ///
 /// If this function is called from:
@@ -87,7 +129,7 @@ pub fn run_ibc_packet_receive(
 /// - `ibc_hook`: setted as std `Msg` without `Reply`
 pub fn create_execute_packet_submsg(
     env: Env,
-    gate_packet: GatePacket,
+    gate_packet: RequestsPacket,
     from_ibc_hook: bool,
 ) -> Result<SubMsg, ContractError> {
     let msg = CosmosMsg::Wasm(WasmMsg::Execute {
@@ -117,7 +159,7 @@ pub fn store_pending_gate_packet(
     storage: &mut dyn Storage,
     sequence: u64,
     channel: String,
-    gate_packet: GatePacket,
+    gate_packet: RequestsPacket,
 ) -> Result<IbcReceiveResponse, ContractError> {
     PENDING_PACKETS.update(
         storage,
@@ -339,25 +381,32 @@ pub fn set_ack_fail(storage: &dyn Storage, err: String) -> Binary {
     to_binary(&res).unwrap()
 }
 
-/// Contract receive a `packet` with `Requests` and a `send_native_info`.
+/// Contract receive a `Packet` with `Requests` and a `send_native_info`.
 /// The contract return an `ack` with the `key` of the stored `packet`.
 pub fn set_ack_send_native_request(
     storage: &dyn Storage,
     sequence: u64,
     channel: String,
-    gate_packet: GatePacket,
+    gate_packet: RequestsPacket,
 ) -> Binary {
     let res = GateAck {
         coin: RECEIVED_FEE.load(storage).unwrap_or(None),
         ack: GateAckType::NativeSendRequest {
-            sequence,
-            channel,
+            dest_key: PacketSavedKey { channel, sequence },
             gate_packet: Box::new(gate_packet),
         },
     };
     to_binary(&res).unwrap()
 }
 
+/// Set on ack if the `Packet` has been removed or not
+pub fn set_ack_packet_removed(src_key: PacketSavedKey, removed: bool) -> Binary {
+    to_binary(&GateAck {
+        coin: None,
+        ack: GateAckType::RemoveStoredPacket { src_key, removed },
+    })
+    .unwrap()
+}
 // --- FUNCTIONS ---
 
 /// Update `BUFFER_QUERIES_RESPONSE` with new query result
