@@ -1,9 +1,10 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{
-    to_binary, Addr, Binary, Coin, CosmosMsg, Empty, QueryRequest, StdError, StdResult, Uint128,
-    WasmMsg,
+    to_binary, Addr, Binary, Coin, CosmosMsg, Empty, QuerierWrapper, QueryRequest, StdError,
+    StdResult, Storage, Uint128, WasmMsg,
 };
 use cw20::Cw20ReceiveMsg;
+use cw_storage_plus::Item;
 
 #[cw_serde]
 pub enum ExecuteMsg {
@@ -401,5 +402,77 @@ pub fn lowest_timeout(from: Option<u64>, with: Option<u64>) -> StdResult<Option<
             None => Ok(Some(from)),
         },
         None => Ok(with),
+    }
+}
+
+const STORED_GATE_INFO: Item<(Addr, Option<u64>)> = Item::new("key_gate_address_pkg");
+
+/// Save `gate_addr` on `Storage`.
+///
+/// Key used: `"key_gate_address_pkg"`
+pub fn save_gate_addr(storage: &mut dyn Storage, gate_address: &Addr) -> StdResult<()> {
+    STORED_GATE_INFO.save(storage, &(gate_address.to_owned(), None))
+}
+
+/// Save `gate_addr` and `code_id` on `Storage`. `code_id` is queried and the current `code_id` will be saved.
+///
+/// When `is_gate_addr` will be called, the saved `code_id` will be assert with the current `code_id` of the specified `Addr`.
+///
+/// ## Allert
+/// - If a migration of `gate` contract is needed, your contract should run `super_save_gate_addr` again to save the new `code_id`.
+///
+/// - If you want to use this method instead of `save_gate_addr`, run `is_gate_addr` also before send a `Request` to the `gate` contract.
+/// This because, if the `gate` contract is migrated and your contract has not updated the `code_id` of the gate and in case of a failure on destination chain,
+/// when `GateMsg::RevertRequest` is sent to your contract from `gate`,
+/// your contract wil reject it if your contract assert the `gate` address with `is_gate_addr`
+///
+/// Key used: `"key_gate_address_pkg"`
+pub fn super_save_gate_addr(
+    storage: &mut dyn Storage,
+    query: &QuerierWrapper,
+    gate_address: Addr,
+) -> StdResult<()> {
+    let code_id = query
+        .query_wasm_contract_info(gate_address.clone())?
+        .code_id;
+    STORED_GATE_INFO.save(storage, &(gate_address, Some(code_id)))
+}
+
+/// Return (`gate_addr` `code_id` if saved with `super_save_gate_addr` else `None`)
+pub fn load_gate_addr(storage: &dyn Storage) -> StdResult<(Addr, Option<u64>)> {
+    STORED_GATE_INFO.load(storage)
+}
+
+/// Assert if a specific `Addr` match with saved `gate_addr`.
+///
+/// If saved with `super_save_gate_addr`, assert also the current `code_id` with the saved one.
+pub fn is_gate_addr(
+    storage: &dyn Storage,
+    query: &QuerierWrapper,
+    gate_address: &Addr,
+) -> StdResult<()> {
+    match STORED_GATE_INFO.load(storage) {
+        Ok((saved_addr, saved_code_id)) => {
+            if let Some(saved_code_id) = saved_code_id {
+                let code_id = query
+                    .query_wasm_contract_info(gate_address.clone())?
+                    .code_id;
+
+                if saved_code_id != code_id {
+                    return Err(StdError::generic_err(format!(
+                        "code_id not match, saved: {saved_code_id}, current: {code_id}"
+                    )));
+                };
+            }
+
+            if saved_addr == gate_address {
+                Ok(())
+            } else {
+                Err(StdError::generic_err(format!(
+                    "gate address not match, saved: {saved_addr}, finded: {gate_address}"
+                )))
+            }
+        }
+        Err(_) => Err(StdError::generic_err("gate address never saved")),
     }
 }

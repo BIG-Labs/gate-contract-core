@@ -320,9 +320,19 @@ pub fn run_ibc_hook(
 ) -> Result<Response, ContractError> {
     match ibc_hook_msg {
         IbcHookMsg::ExecutePendingRequest { channel, sequence } => {
-            let pending_packet = PENDING_PACKETS.load(deps.storage, (channel.clone(), sequence))?;
+            // If the packet is not found, it has to been triggered manually during the first and this second packet.
+            // revert is not needed have in this case, someone else paid native token
+            let pending_packet =
+                match PENDING_PACKETS.load(deps.storage, (channel.clone(), sequence)) {
+                    Ok(packet) => packet,
+                    Err(_) => {
+                        return Ok(Response::new()
+                            .add_attribute("action", "ibc_hook")
+                            .add_attribute("status", "alredy_triggered"))
+                    }
+                };
+
             PENDING_PACKETS.remove(deps.storage, (channel, sequence));
-            // Ok(Response::new().add_attribute("ibc_hook_status", "ok"))
             Ok(Response::new()
                 .add_submessage(create_execute_packet_submsg(env, pending_packet, true)?)
                 .add_attribute("action", "ibc_hook"))

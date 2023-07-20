@@ -1,7 +1,7 @@
 use cosmwasm_std::{
     from_binary,
     testing::{mock_dependencies, mock_env, mock_info},
-    to_binary, Addr, Coin, CosmosMsg, ReplyOn, StdError, SubMsg, Uint128, WasmMsg,
+    to_binary, Addr, Coin, CosmosMsg, ReplyOn, SubMsg, Uint128, WasmMsg,
 };
 use cw20::{BalanceResponse, Cw20Coin, Cw20ReceiveMsg, MinterResponse};
 use cw20_base::ContractError;
@@ -293,20 +293,13 @@ fn test() {
         msg: to_binary(&bridge_request_msg).unwrap(),
     });
 
-    let res = execute(
+    execute(
         deps.as_mut(),
         env.clone(),
         mock_info("fake_gate", &[]),
         msg.clone(),
-    );
-
-    assert_eq!(
-        res.unwrap_err().to_string(),
-        ContractError::Std(StdError::GenericErr {
-            msg: "NotGate".to_string(),
-        })
-        .to_string()
-    );
+    )
+    .unwrap_err();
 
     // From gate
 
@@ -408,20 +401,13 @@ fn test() {
         },
     });
 
-    let res = execute(
+    execute(
         deps.as_mut(),
         env.clone(),
         mock_info("fake_gate", &[]),
         msg.clone(),
-    );
-
-    assert_eq!(
-        res.unwrap_err().to_string(),
-        ContractError::Std(StdError::GenericErr {
-            msg: "NotGate".to_string(),
-        })
-        .to_string()
-    );
+    )
+    .unwrap_err();
 
     execute(
         deps.as_mut(),

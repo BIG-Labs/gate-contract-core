@@ -14,9 +14,12 @@ use cw20_base::{
     ContractError,
 };
 use cw20_icg_pkg::{Cw20GateMsgType, ExecuteMsg, InstantiateMsg, QueryMsg};
-use gate_pkg::{ExecuteMsg as GateExecuteMsg, GateMsg, GateRequest, Permission};
+use gate_pkg::{
+    is_gate_addr, load_gate_addr, save_gate_addr, ExecuteMsg as GateExecuteMsg, GateMsg,
+    GateRequest, Permission,
+};
 
-use crate::state::{CHAINS_CONTRACT, GATE};
+use crate::state::CHAINS_CONTRACT;
 
 // version info for migration info
 const CONTRACT_NAME: &str = "crates.io:cw20-icg";
@@ -122,7 +125,7 @@ pub fn execute(
 pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::RemoteContract { chain } => to_binary(&qy_remote_contract(deps, chain).unwrap()),
-        QueryMsg::Gate {} => to_binary(&GATE.load(deps.storage).unwrap().to_string()),
+        QueryMsg::Gate {} => to_binary(&load_gate_addr(deps.storage)?.0),
         _ => {
             let msg: BaseCw20QueryMsg = from_binary(&to_binary(&msg)?)?;
             cw20_query(deps, env, msg)
@@ -161,7 +164,7 @@ fn run_register_gate(
 ) -> Result<Response, ContractError> {
     only_minter(deps.as_ref(), sender)?;
 
-    GATE.save(deps.storage, &contract_gate)?;
+    save_gate_addr(deps.storage, &contract_gate)?;
 
     Ok(Response::new()
         .add_attribute("action", "register_gate")
@@ -179,7 +182,7 @@ fn run_gate_set_permission(
     CHAINS_CONTRACT.save(deps.storage, chain.clone(), &contract)?;
 
     let msg = CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Execute {
-        contract_addr: GATE.load(deps.storage)?.to_string(),
+        contract_addr: load_gate_addr(deps.storage)?.0.to_string(),
         msg: to_binary(&GateExecuteMsg::SetPermission {
             permission: Permission::Permissioned {
                 addresses: vec![contract.clone()],
@@ -206,7 +209,7 @@ fn run_gate_bridge(
     lower_balance(deps.storage, sender.clone(), amount)?;
 
     let msg = CosmosMsg::Wasm(WasmMsg::Execute {
-        contract_addr: GATE.load(deps.storage)?.to_string(),
+        contract_addr: load_gate_addr(deps.storage)?.0.to_string(),
         msg: to_binary(&GateExecuteMsg::SendRequests {
             requests: vec![GateRequest::SendMsg {
                 msg: to_binary(&Cw20GateMsgType::Bridge {
@@ -243,7 +246,7 @@ fn run_gate_bridge_and_execute(
     lower_balance(deps.storage, sender.clone(), amount)?;
 
     let msg = CosmosMsg::Wasm(WasmMsg::Execute {
-        contract_addr: GATE.load(deps.storage)?.to_string(),
+        contract_addr: load_gate_addr(deps.storage)?.0.to_string(),
         msg: to_binary(&GateExecuteMsg::SendRequests {
             requests: vec![GateRequest::SendMsg {
                 msg: to_binary(&Cw20GateMsgType::BridgeAndExecute {
@@ -279,7 +282,7 @@ fn run_gate_receive_msg(
     msg: Binary,
 ) -> Result<Response, ContractError> {
     // The gate is alredy checking if the remote_cw20_contract has been registered by this local contract
-    only_gate(deps.as_ref(), gate)?;
+    is_gate_addr(deps.storage, &deps.querier, &gate)?;
 
     let (address_token_receiver, amount, res) = match from_binary(&msg)? {
         Cw20GateMsgType::Bridge {
@@ -331,7 +334,7 @@ fn run_gate_revert_msg(
     gate: Addr,
     request: GateRequest,
 ) -> Result<Response, ContractError> {
-    only_gate(deps.as_ref(), gate)?;
+    is_gate_addr(deps.storage, &deps.querier, &gate)?;
 
     match request {
         GateRequest::SendMsg { msg, .. } => {
@@ -376,16 +379,6 @@ fn only_minter(deps: Deps, address: Addr) -> Result<(), ContractError> {
             }
         }
         None => Err(ContractError::Unauthorized {}),
-    }
-}
-
-fn only_gate(deps: Deps, address: Addr) -> Result<(), ContractError> {
-    if GATE.load(deps.storage)? == address {
-        Ok(())
-    } else {
-        Err(ContractError::Std(StdError::GenericErr {
-            msg: "NotGate".to_string(),
-        }))
     }
 }
 
