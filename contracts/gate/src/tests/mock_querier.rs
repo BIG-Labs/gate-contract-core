@@ -20,7 +20,7 @@ pub fn custom_mock_dependencies() -> OwnedDeps<MockStorage, MockApi, WasmMockQue
         storage: MockStorage::default(),
         api: MockApi::default(),
         querier: WasmMockQuerier::new(),
-        custom_query_type: PhantomData::default(),
+        custom_query_type: PhantomData,
     }
 }
 
