@@ -1,95 +1,111 @@
-use cosmwasm_std::{
-    from_binary, to_binary, Addr, Binary, Coin, CosmosMsg, Env, QuerierWrapper, StdError,
-    StdResult, Storage, Uint128,
-};
-use schemars::_serde_json::Value;
-use std::{
-    collections::{HashMap, VecDeque},
-    str::FromStr,
+use std::collections::BTreeMap;
+
+use cosmwasm_std::{Addr, CosmosMsg, Env, QuerierWrapper, StdError, StdResult, Storage, Uint128};
+use rhaki_cw_plus::{
+    encdec::{base64_decode_as_string, base64_encode},
+    serde::{value_from_string, value_to_comsos_msg, value_to_string, Value},
 };
 
 use cw20::{BalanceResponse as Cw20BalanceResponse, Cw20QueryMsg};
 
-use base64::{engine::general_purpose, Engine as _};
+use crate::state::BALANCES;
 
-use crate::{
-    msgs::{IndexType, ReplaceInfo, ReplaceKeyType, ReplacePath, TokenInfo},
-    state::BALANCES,
-};
+use account_icg_pkg::definitions::{ReplaceInfo, ReplaceValueType, TokenInfo};
 
-pub fn replace_amount(
-    msg: CosmosMsg,
-    replace_info: &ReplaceInfo,
-    amount: Uint128,
-) -> StdResult<CosmosMsg> {
-    let msg: Value = from_binary(&to_binary(&msg)?)?;
-
-    let msg_mod = replace_amount_rec(msg, amount, VecDeque::from(replace_info.path.to_owned()));
-
-    from_binary(&to_binary(&msg_mod)?)
-}
-
-fn replace_amount_rec(mut json: Value, amount: Uint128, mut paths: VecDeque<ReplacePath>) -> Value {
-    let path = paths.pop_front();
-
-    if let Some(cur) = path {
-        let i = match cur.key_type {
-            ReplaceKeyType::String => IndexType::String(cur.value.clone()),
-            ReplaceKeyType::IndexArray => {
-                IndexType::Index(u32::from_str(cur.value.as_str()).unwrap() as usize)
+pub fn vec_replace_info_into_result(
+    storage: &mut dyn Storage,
+    querier: &QuerierWrapper,
+    env: &Env,
+    replace_infos: Vec<ReplaceInfo>,
+) -> Vec<(String, String)> {
+    replace_infos
+        .into_iter()
+        .map(|info| match info.value {
+            ReplaceValueType::TokenAmount(token) => {
+                let res = avaiable_amount(storage, querier, env, &token).unwrap();
+                (info.key, res.to_string())
             }
-        };
+        })
+        .collect()
+}
 
-        let mut next = json[i.as_index().as_ref()].to_owned();
-
-        if cur.is_next_in_binary {
-            next = value_from_b64(&next);
-        }
-
-        next = replace_amount_rec(next.clone(), amount, paths);
-
-        if cur.is_next_in_binary {
-            next = value_to_b64(&next);
-        }
-
-        json[i.as_index().as_ref()] = next;
-
-        json
+pub fn substitute_key_in_value_into_comsos_msg(
+    storage: &mut dyn Storage,
+    querier: &QuerierWrapper,
+    env: &Env,
+    input: &Value,
+    replace_info: Vec<ReplaceInfo>,
+) -> StdResult<CosmosMsg> {
+    let res = if !replace_info.is_empty() {
+        let substitutes = vec_replace_info_into_result(storage, querier, env, replace_info);
+        recursive_decode(input.clone(), substitutes)?
     } else {
-        Value::from(amount.to_string())
-    }
+        input.clone()
+    };
+
+    value_to_comsos_msg(&res)
 }
 
-fn value_from_b64(value: &Value) -> Value {
-    from_binary(&Binary::from_base64(value.as_str().unwrap()).unwrap()).unwrap()
-}
-
-fn value_to_b64(value: &Value) -> Value {
-    Value::from(general_purpose::STANDARD.encode(value.to_string()))
-}
-
-pub fn vec_coins_to_hashmap(coins: Vec<Coin>) -> StdResult<HashMap<String, Uint128>> {
-    let mut m: HashMap<String, Uint128> = HashMap::new();
-
-    for coin in coins {
-        if m.contains_key(&coin.denom) {
-            return Err(StdError::generic_err(format!(
-                "multiple denom detected, {}",
-                &coin.denom
-            )));
+pub fn recursive_decode(value: Value, variables: Vec<(String, String)>) -> StdResult<Value> {
+    // match the type of the Value
+    match value.clone() {
+        // if it's a string
+        Value::String(string_value) => {
+            // for each variable in variables
+            for (k, v) in variables.clone() {
+                // check if we can replace it
+                if k == string_value {
+                    // serialize into Value
+                    return Ok(Value::String(v.clone()));
+                }
+            }
+            // if we didn't find the variables, try to decode
+            match base64_decode_as_string(&string_value) {
+                // if we can decode call recursive decode again to serialize the new substring into a Value
+                Ok(v) => {
+                    let decoded: Value = recursive_decode(value_from_string(&v)?, variables)?;
+                    // Encode again the substring
+                    let decoded_str: String = value_to_string(&decoded)?;
+                    Ok(Value::String(base64_encode(&decoded_str)))
+                }
+                // else return the value (not decoded)
+                Err(_) => Ok(value),
+            }
         }
-        m.insert(coin.denom, coin.amount);
-    }
+        // if it's a struct map it
+        Value::Map(map) => {
+            let mut new_map: BTreeMap<Value, Value> = BTreeMap::new();
+            // iter each key
+            for (k, v) in map.iter() {
+                // for each key call recursive_decode and decode again
+                let result = recursive_decode(v.clone(), variables.clone())?;
+                // create a Map assiging the key with the object the Map will be in alphabetical order
+                new_map.insert(k.clone(), result);
+            }
+            // return the msg once done
+            Ok(Value::Map(new_map))
+        }
+        // if it's an array
+        Value::Seq(arr) => {
+            // iter into it and recursive decode fields
+            let iter_arr: Vec<Value> = arr
+                .into_iter()
+                .map(|i| recursive_decode(i, variables.clone()).unwrap())
+                .collect();
 
-    Ok(m)
+            Ok(Value::Seq(iter_arr))
+        }
+        // we could add more type of data there
+        _ => Ok(value),
+    }
 }
 
 pub fn query_token_balance(querier: &QuerierWrapper, token: &TokenInfo, address: &Addr) -> Uint128 {
     match token {
-        TokenInfo::Cw20(contract) => {
+        TokenInfo::Cw20(address) => {
             querier
                 .query_wasm_smart::<Cw20BalanceResponse>(
-                    contract,
+                    address,
                     &Cw20QueryMsg::Balance {
                         address: address.to_string(),
                     },
@@ -107,9 +123,9 @@ pub fn query_token_balance(querier: &QuerierWrapper, token: &TokenInfo, address:
 }
 
 pub fn avaiable_amount(
-    env: &Env,
     storage: &mut dyn Storage,
     querier: &QuerierWrapper,
+    env: &Env,
     info: &TokenInfo,
 ) -> StdResult<Uint128> {
     match BALANCES.load(storage)?.get(&info.as_string()) {

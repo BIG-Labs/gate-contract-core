@@ -1,4 +1,4 @@
-use cosmwasm_std::{Coin, StdError};
+use cosmwasm_std::{Addr, Coin, StdError};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -55,4 +55,21 @@ pub enum ContractError {
 
     #[error("Query failed")]
     QueryFailed {},
+
+    #[error("Address with another gate account: address: {address}, chain: {chain}, gate_account{gate_account}")]
+    AddressWithAccount {
+        address: String,
+        chain: String,
+        gate_account: Addr,
+    },
+
+    #[error("Pending address not match: pending: {pending}, registering: {registering}")]
+    PendingWrongAddress { pending: Addr, registering: Addr },
+
+    #[error("Account in pending: account: {account_addr}, user: {user_addr}, chain: {chain}")]
+    AccountInPending {
+        account_addr: Addr,
+        user_addr: String,
+        chain: String,
+    },
 }

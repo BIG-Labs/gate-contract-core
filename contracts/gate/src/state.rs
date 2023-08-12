@@ -6,11 +6,13 @@ use enum_repr::EnumRepr;
 use gate_pkg::{
     ChannelInfo, Config, GateRequestsInfo, Permission, QueryRequestInfoResponse, SendNativeInfo,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // --- CONSTANTS ---
 
 pub const CONIFG: Item<Config> = Item::new("config");
+
+pub const LOCAL_CHAIN_NAME: &str = "local_chain";
 
 pub const REGISTERED_CONTRACTS: Map<(String, String), Permission> =
     Map::new("registered_contracts");
@@ -43,15 +45,15 @@ pub const ICG_ORDERING: IbcOrder = IbcOrder::Unordered;
 
 pub const LAST_FAILED_KEY_GENERATED: Item<(u64, u64)> = Item::new("last_failed_key_generated");
 
-#[index_list(ChannelInfo)]
-pub struct ChannelInfoChannelIndexes<'a> {
-    pub src_channel_dest_channel: MultiIndex<'a, String, ChannelInfo, String>,
-}
-
 #[cw_serde]
 pub struct PacketSavedKey {
     pub channel: String,
     pub sequence: u64,
+}
+
+#[index_list(ChannelInfo)]
+pub struct ChannelInfoChannelIndexes<'a> {
+    pub src_channel_dest_channel: MultiIndex<'a, String, ChannelInfo, String>,
 }
 
 #[allow(non_snake_case)]
@@ -60,11 +62,47 @@ pub fn CHAIN_REGISTERED_CHANNELS<'a>(
     let indexes = ChannelInfoChannelIndexes {
         src_channel_dest_channel: MultiIndex::new(
             |_pk, channel_info| channel_info.src_channel_id.clone(),
-            "ns",
-            "ns_src_channel_dest_channel",
+            "ns_chains",
+            "ns_chains_src_channel_dest_channel",
         ),
     };
-    IndexedMap::new("ns", indexes)
+    IndexedMap::new("ns_chains", indexes)
+}
+
+#[index_list(GateAccountState)]
+pub struct GateAddrIndexes<'a> {
+    pub by_addr: MultiIndex<'a, Addr, GateAccountState, (String, String)>,
+}
+
+#[allow(non_snake_case)]
+pub fn GATE_ACCOUNT<'a>() -> IndexedMap<'a, (String, String), GateAccountState, GateAddrIndexes<'a>>
+{
+    let indexes = GateAddrIndexes {
+        by_addr: MultiIndex::new(
+            |_pk, state| match state {
+                GateAccountState::Pending(addr) => addr.clone(),
+                GateAccountState::Registered(addr) => addr.clone(),
+            },
+            "ns_gate_accounts",
+            "ns_gate_accounts_by_addr",
+        ),
+    };
+    IndexedMap::new("ns_gate_accounts", indexes)
+}
+
+#[cw_serde]
+pub enum GateAccountState {
+    Pending(Addr),
+    Registered(Addr),
+}
+
+impl GateAccountState {
+    pub fn get_addr(&self) -> Addr {
+        match self {
+            GateAccountState::Pending(addr) => addr.clone(),
+            GateAccountState::Registered(addr) => addr.clone(),
+        }
+    }
 }
 
 // --- MSGS ---
@@ -82,6 +120,7 @@ pub struct InstantiateMsg {
     pub default_timeout: u64,
     pub default_gas_limit: Option<u64>,
     pub cw20_icg_code_id: u64,
+    pub account_icg_code_id: u64,
     pub base_denom: String,
     pub max_gas_amount_per_revert: u64,
 }
@@ -108,19 +147,20 @@ pub enum ReplyID {
     ExecuteRequest = 1,
     AckContract = 2,
     InitToken = 3,
-    MintVoucher = 4,
-    SendIbcHookPacket = 5,
+    MintVoucher = 5,
+    SendIbcHookPacket = 6,
 }
 
 /// Base Ack structure
-#[cw_serde]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct GateAck {
     pub coin: Option<Coin>,
     pub ack: GateAckType,
 }
 
 /// Ack type handled by gate contract
-#[cw_serde]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum GateAckType {
     EmptyResult,
     QueryResult(Vec<QueryRequestInfoResponse>),
@@ -137,7 +177,8 @@ pub enum GateAckType {
 
 // --- STRUCTURES ---
 
-#[cw_serde]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum GatePacket {
     RequestPacket(Box<RequestsPacket>),
     RemoveStoredPacket {
@@ -157,7 +198,7 @@ impl GatePacket {
     }
 }
 
-#[cw_serde]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RequestsPacket {
     pub from_chain: Option<String>,
     pub to_chain: String,
@@ -166,7 +207,7 @@ pub struct RequestsPacket {
     pub send_native: Option<SendNativeInfo>,
 }
 
-#[cw_serde]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct GatePacketInfo {
     pub packet: RequestsPacket,
     pub timeout: Option<u64>,

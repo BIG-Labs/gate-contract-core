@@ -2,6 +2,7 @@ use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Addr, Binary, StdError, StdResult, Uint128};
 use cw20::{Cw20Coin, Expiration, Logo, MinterResponse};
 use gate_pkg::GateMsg;
+use serde::{Deserialize, Serialize};
 
 #[cw_serde]
 pub enum Cw20GateMsgType {
@@ -20,7 +21,8 @@ pub enum Cw20GateMsgType {
     },
 }
 
-#[cw_serde]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
     Transfer {
         recipient: String,

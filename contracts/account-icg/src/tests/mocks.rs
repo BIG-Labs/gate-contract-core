@@ -1,35 +1,14 @@
+use cosmwasm_std::{Addr, Coin, Uint128};
+use cw_multi_test::{App, AppBuilder, ContractWrapper, Executor};
 
-use cosmwasm_schema::cw_serde;
-use cosmwasm_std::{Uint128, Addr, Coin, testing::{mock_dependencies_with_balances, mock_env, mock_info, MockStorage, MockApi, MockQuerier}, OwnedDeps, Env, entry_point, DepsMut, MessageInfo, Response, StdError, Deps, StdResult, Binary};
-use cw_multi_test::{App, ContractWrapper, Executor, AppBuilder};
+use account_icg_pkg::msgs::InstantiateMsg;
 
-use crate::{msgs::{InstantiateMsg, TokenInfo}, contract::{instantiate, execute, query}, function::query_token_balance};
+use crate::contract::{execute, instantiate, query};
 
 pub const GATE_ADDR: &str = "gate_addr";
 
-pub fn _startup() -> (OwnedDeps<MockStorage, MockApi, MockQuerier>, Env) {
-
-    let contract_addr = "icg-account_addr";
-
-    let balances: &[(&str, &[Coin])]= &[
-        (contract_addr, &start_balance())
-    ];
-
-    let mut deps = mock_dependencies_with_balances(balances);
-    let mut env = mock_env();
-    env.contract.address = Addr::unchecked(contract_addr);
-
-    let msg = InstantiateMsg{
-        external_owners: external_owners(),
-        local_owners: local_owners(),
-    };
-
-    instantiate(deps.as_mut(), env.clone(), mock_info(GATE_ADDR, &[]), msg).unwrap();
-
-    (deps, env)
-
-}
-
+pub const ACCOUNT_ADDR: &str = "contract0";
+pub const MOCK_ADDR: &str = "contract1";
 
 fn mock_app(init_funds: &[Coin]) -> App {
     AppBuilder::new().build(|router, _, storage| {
@@ -39,111 +18,177 @@ fn mock_app(init_funds: &[Coin]) -> App {
             .unwrap();
     })
 }
-pub fn startup_app() -> (App, Addr, Addr) {
 
+/// Startup App and contracts
+/// - `50_000` `uatom` are sent to `MOCK_CONTRACT`
+/// - `100` `uatom` are sent to `ACCOUNT_CONTRACT`
+pub fn startup_app() -> App {
     let mut app = mock_app(&start_balance());
-    
+
     let code_account = app.store_code(Box::new(ContractWrapper::new(execute, instantiate, query)));
 
-    let code_mock = app.store_code(Box::new(ContractWrapper::new(mock_execute, mock_instantiate, mock_query)));
+    let code_mock = app.store_code(Box::new(ContractWrapper::new(
+        mock_contract::execute,
+        mock_contract::instantiate,
+        mock_contract::query,
+    )));
 
-    let init_msg = InstantiateMsg{
-        external_owners: external_owners(),
-        local_owners: local_owners(),
-    };
+    let init_msg = InstantiateMsg {};
 
-    let contract_account = app.instantiate_contract(code_account, Addr::unchecked(GATE_ADDR), &init_msg, &[], "account", None).unwrap();
+    let contract_account = app
+        .instantiate_contract(
+            code_account,
+            Addr::unchecked(GATE_ADDR),
+            &init_msg,
+            &[],
+            "account",
+            None,
+        )
+        .unwrap();
 
-    let contract_mock = app.instantiate_contract(code_mock, Addr::unchecked("random_addr"), &MockInstantiate{}, &[], "mock_contract", None).unwrap();
+    assert_eq!(contract_account, ACCOUNT_ADDR);
 
-    // app.send_tokens(Addr::unchecked(GATE_ADDR), contract_account.clone(), &start_balance()).unwrap();
+    let contract_mock = app
+        .instantiate_contract(
+            code_mock,
+            Addr::unchecked("random_addr"),
+            &mock_contract::InstantiateMsg {},
+            &[],
+            "mock_contract",
+            None,
+        )
+        .unwrap();
 
-    (app, contract_account, contract_mock)
+    assert_eq!(contract_mock, MOCK_ADDR);
 
-}
+    app.send_tokens(
+        Addr::unchecked(GATE_ADDR),
+        Addr::unchecked(MOCK_ADDR),
+        &[Coin {
+            denom: "uatom".to_string(),
+            amount: Uint128::from(50_000_u128),
+        }],
+    )
+    .unwrap();
 
-pub fn external_owners() -> Vec<(String, String)>{
-    vec![
-        ("osmo123".to_string(), "osmosis".to_string()),
-        ("inj123".to_string(), "injective".to_string())
-    ]
-}
+    app.send_tokens(
+        Addr::unchecked(GATE_ADDR),
+        Addr::unchecked(ACCOUNT_ADDR),
+        &[Coin {
+            denom: "uatom".to_string(),
+            amount: Uint128::from(100_u128),
+        }],
+    )
+    .unwrap();
 
-pub fn local_owners() -> Vec<Addr> {
-    vec![
-        Addr::unchecked("terra123")
-    ]
+    app
 }
 
 pub fn start_balance() -> Vec<Coin> {
-    return vec![
-        Coin{denom: "ustake".to_string(), amount:Uint128::from(100_u128)}
-    ];
+    vec![
+        Coin {
+            denom: "uluna".to_string(),
+            amount: Uint128::from(100_000_u128),
+        },
+        Coin {
+            denom: "uatom".to_string(),
+            amount: Uint128::from(100_000_u128),
+        },
+    ]
 }
 
-// --- MOCK CONTRACT ---
+mod mock_contract {
+    use account_icg_pkg::definitions::TokenInfo;
+    use cosmwasm_schema::cw_serde;
+    use cosmwasm_std::{
+        entry_point, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Response,
+        StdError, StdResult, Uint128,
+    };
 
-#[cw_serde]
-pub struct MockInstantiate {
-}
+    use crate::function::query_token_balance;
 
-#[cw_serde]
-pub enum MockExecuteMsg {
-    Deposit { amount: Uint128 },
-    Swap { amount:Uint128, request:TokenInfo }
-}
+    #[cw_serde]
+    pub struct InstantiateMsg {}
 
-#[cw_serde]
-pub enum MockQueryMsg {
-}
-
-#[entry_point]
-pub fn mock_instantiate(
-    _deps: DepsMut,
-    _env: Env,
-    _info: MessageInfo,
-    _msg: MockInstantiate) -> Result<Response, StdError> {
-
-    Ok(Response::new())
-}
-
-
-#[entry_point]
-pub fn mock_execute(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    msg: MockExecuteMsg,
-) -> Result<Response, StdError> {
-
-    let mut res = Response::new();
-
-    for i in &info.funds {
-        res = res.add_attribute(i.denom.clone(), i.amount);
+    #[cw_serde]
+    pub enum ExecuteMsg {
+        Deposit {
+            amount_deposit: Uint128,
+        },
+        Swap {
+            amount_swap: Uint128,
+            request: TokenInfo,
+            amount_ask: Uint128,
+        },
     }
 
-    if let MockExecuteMsg::Swap { amount, request } = msg {
+    #[cw_serde]
+    pub enum QueryMsg {}
 
-        let coin = info.funds.first().unwrap();
+    #[entry_point]
+    pub fn instantiate(
+        _deps: DepsMut,
+        _env: Env,
+        _info: MessageInfo,
+        _msg: InstantiateMsg,
+    ) -> StdResult<Response> {
+        Ok(Response::new())
+    }
 
-        if coin.amount != amount {
-            return  Err(StdError::generic_err("amount not match"));
+    #[entry_point]
+    pub fn execute(
+        deps: DepsMut,
+        env: Env,
+        info: MessageInfo,
+        msg: ExecuteMsg,
+    ) -> Result<Response, StdError> {
+        let mut res = Response::new();
+
+        for i in &info.funds {
+            res = res.add_attribute(i.denom.clone(), i.amount);
         }
 
-        let amount = query_token_balance(&deps.querier, &request, &env.contract.address);
+        match msg {
+            ExecuteMsg::Deposit { amount_deposit } => {
+                let coin = info.funds.first().unwrap();
 
+                if coin.amount != amount_deposit {
+                    return Err(StdError::generic_err("Amount sent not match"));
+                };
+            }
+            ExecuteMsg::Swap {
+                amount_swap,
+                request,
+                amount_ask,
+            } => {
+                let coin = info.funds.first().unwrap();
 
-        
+                if coin.amount != amount_swap {
+                    return Err(StdError::generic_err("Amount sent not match"));
+                }
+
+                let current_amount_ask =
+                    query_token_balance(&deps.querier, &request, &env.contract.address);
+
+                if current_amount_ask < amount_ask {
+                    return Err(StdError::generic_err("Asket amount to low"));
+                }
+
+                res = res.add_message(CosmosMsg::Bank(BankMsg::Send {
+                    to_address: info.sender.to_string(),
+                    amount: vec![Coin {
+                        denom: request.as_string(),
+                        amount: amount_ask,
+                    }],
+                }));
+            }
+        }
+
+        Ok(res)
     }
 
-
-
-    Ok(res)
-
+    #[entry_point]
+    pub fn query(_deps: Deps, _env: Env, _msg: QueryMsg) -> StdResult<Binary> {
+        Ok(Binary::default())
+    }
 }
-
-#[entry_point]
-pub fn mock_query(_deps: Deps, _env: Env, _msg: MockQueryMsg) -> StdResult<Binary> {
-    Ok(Binary::default())
-}
-

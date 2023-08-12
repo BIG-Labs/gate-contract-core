@@ -1,33 +1,31 @@
 use cosmwasm_std::{
     from_binary, to_binary, wasm_instantiate, Addr, BankMsg, Binary, Coin, CosmosMsg, DepsMut, Env,
-    IbcBasicResponse, IbcMsg, IbcPacketAckMsg, IbcPacketTimeoutMsg, Response, StdError, StdResult,
-    Storage, SubMsg, SubMsgResponse, SubMsgResult, Uint128, WasmMsg,
+    IbcBasicResponse, IbcMsg, IbcPacketAckMsg, IbcPacketTimeoutMsg, Reply, Response, StdError,
+    StdResult, Storage, SubMsg, SubMsgResponse, SubMsgResult, Uint128, WasmMsg,
 };
 use cw20::{Cw20ReceiveMsg, MinterResponse};
+use cw_utils::parse_reply_instantiate_data;
 use gate_pkg::{
-    lowest_timeout, merge_send_native, Config, ExecuteMsg, GateMsg, GateRequest, GateRequestsInfo,
-    IbcHookMsg, PacketPath, Permission, QueryRequestInfoResponse,
+    lowest_timeout, merge_send_native, Config, ExecuteMsg, GateAccountRequest, GateMsg,
+    GateRequest, GateRequestsInfo, IbcHookMsg, PacketPath, Permission, QueryRequestInfoResponse,
 };
 use prost::Message as ProstMessage;
-use protobuf::Message as ProtoMessage;
 use schemars::_serde_json::to_string_pretty;
 
 use crate::{
     error::ContractError,
-    extra::{
-        msg_transfer::{MsgTransfer, MsgTransferResponse},
-        response::MsgInstantiateContractResponse,
-    },
+    extra::msg_transfer::{MsgTransfer, MsgTransferResponse},
     functions::{
-        get_base_denom, get_channel_from_chain, get_remote_gate_addr_from_chain, is_controller,
-        merge_fee,
+        gate_account_add_owners, gate_account_create_account, gate_account_execute_requests,
+        gate_account_remove_owners, gate_account_validate_registration, get_base_denom,
+        get_channel_from_chain, get_remote_gate_addr_from_chain, is_controller, merge_fee,
     },
     state::{
         Cw20MsgType, ForwardField, GateAck, GateAckType, GatePacket, GatePacketInfo, MemoField,
         PacketSavedKey, RegisteringVoucherChain, ReplyID, RequestsPacket, WasmField,
         BUFFER_PACKETS, CHAIN_REGISTERED_CHANNELS, CHANNEL_INFO, CONIFG, IS_REGISTERING,
-        LAST_FAILED_KEY_GENERATED, PACKET_IBC_HOOK_AWAITING_ACK, PACKET_IBC_HOOK_AWAITING_REPLY,
-        REGISTERED_CONTRACTS, VOUCHER_REGISTERING_CHAIN,
+        LAST_FAILED_KEY_GENERATED, LOCAL_CHAIN_NAME, PACKET_IBC_HOOK_AWAITING_ACK,
+        PACKET_IBC_HOOK_AWAITING_REPLY, REGISTERED_CONTRACTS, VOUCHER_REGISTERING_CHAIN,
     },
 };
 
@@ -146,6 +144,10 @@ pub fn run_register_remote_chain_and_channel(
     base_denom: String,
 ) -> Result<Response, ContractError> {
     is_controller(deps.as_ref(), controller)?;
+
+    if chain == *LOCAL_CHAIN_NAME {
+        return Err(ContractError::Unauthorized {});
+    }
 
     let mut channel_info = CHANNEL_INFO.load(deps.storage, src_channel)?;
     channel_info.base_denom = Some(base_denom);
@@ -266,6 +268,72 @@ pub fn run_set_voucher_permission(
     Ok(Response::new().add_message(msg))
 }
 
+// --- GATE ACCOUNT ---
+
+pub fn run_gate_account_msg(
+    mut deps: DepsMut,
+    env: Env,
+    sender: Addr,
+    funds: Vec<Coin>,
+    msg: GateAccountRequest,
+) -> Result<Response, ContractError> {
+    let msg = match msg {
+        GateAccountRequest::CreateAccount {
+            remote_owners,
+            local_owners,
+        } => gate_account_create_account(
+            &mut deps,
+            env,
+            sender.to_string(),
+            LOCAL_CHAIN_NAME.to_string(),
+            remote_owners,
+            local_owners,
+        )?,
+        GateAccountRequest::AddOwners {
+            remote_owners,
+            local_owners,
+        } => gate_account_add_owners(
+            deps.storage,
+            sender.to_string(),
+            LOCAL_CHAIN_NAME.to_string(),
+            remote_owners,
+            local_owners,
+        )?,
+        GateAccountRequest::RemoveOwners {
+            remote_owners,
+            local_owners,
+        } => gate_account_remove_owners(
+            deps.storage,
+            sender.to_string(),
+            LOCAL_CHAIN_NAME.to_string(),
+            remote_owners,
+            local_owners,
+        )?,
+        GateAccountRequest::ExecuteMsgs { msgs, .. } => gate_account_execute_requests(
+            deps.storage,
+            sender.to_string(),
+            LOCAL_CHAIN_NAME.to_string(),
+            msgs,
+            funds,
+        )?,
+        GateAccountRequest::ValidateRegistration { account_addr } => {
+            gate_account_validate_registration(
+                &mut deps,
+                account_addr,
+                sender.to_string(),
+                LOCAL_CHAIN_NAME.to_string(),
+            )?
+        }
+    };
+
+    let mut response = Response::new();
+
+    if let Some(msg) = msg {
+        response = response.add_message(msg);
+    }
+    Ok(response)
+}
+
 // --- REPLY ---
 
 /// Reply when we send `RequestFailed` msg to the sender contract
@@ -279,57 +347,45 @@ pub fn reply_ack_contract(_deps: DepsMut, result: SubMsgResult) -> Result<Respon
 }
 
 /// Reply on init a voucher
-pub fn reply_init_token(
-    deps: DepsMut,
-    env: Env,
-    result: SubMsgResult,
-) -> Result<Response, ContractError> {
-    match result {
-        // if `Ok`, get the contract address of cw20 token and save it
-        SubMsgResult::Ok(sub_response) => {
-            let data = sub_response.data.unwrap();
-            let res: MsgInstantiateContractResponse =
-                ProtoMessage::parse_from_bytes(data.as_slice()).map_err(|_| {
-                    StdError::parse_err("MsgInstantiateContractResponse", "failed to parse data")
-                })?;
+pub fn reply_init_token(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, ContractError> {
+    let contract_addr = parse_reply_instantiate_data(reply)
+        .unwrap()
+        .contract_address;
 
-            match VOUCHER_REGISTERING_CHAIN.load(deps.storage).unwrap() {
-                Some(value) => {
-                    match value {
-                        RegisteringVoucherChain::Local => {
-                            CONIFG.update(
-                                deps.storage,
-                                |mut current| -> Result<Config, ContractError> {
-                                    current.voucher_contract = Some(res.contract_address.clone());
-                                    Ok(current)
-                                },
-                            )?;
-                        }
-
-                        RegisteringVoucherChain::Chain { name } => {
-                            let mut chain_info =
-                                CHAIN_REGISTERED_CHANNELS().load(deps.storage, name.clone())?;
-                            chain_info.voucher_contract = Some(res.contract_address.clone());
-
-                            CHAIN_REGISTERED_CHANNELS().save(deps.storage, name, &chain_info)?;
-                        }
-                    }
-                    Ok(
-                        Response::new().add_message(CosmosMsg::Wasm(WasmMsg::Execute {
-                            contract_addr: res.contract_address,
-                            msg: to_binary(&Cw20ExecuteMsg::RegisterGate {
-                                contract: env.contract.address,
-                            })?,
-                            funds: vec![],
-                        })),
-                    )
+    match VOUCHER_REGISTERING_CHAIN.load(deps.storage).unwrap() {
+        Some(value) => {
+            match value {
+                RegisteringVoucherChain::Local => {
+                    CONIFG.update(
+                        deps.storage,
+                        |mut current| -> Result<Config, ContractError> {
+                            current.voucher_contract = Some(contract_addr.clone());
+                            Ok(current)
+                        },
+                    )?;
                 }
-                None => Err(ContractError::Std(StdError::generic_err(
-                    "VOUCHER_REGISTERING_CHAIN not setted, this shouldn't happen",
-                ))),
+
+                RegisteringVoucherChain::Chain { name } => {
+                    let mut chain_info =
+                        CHAIN_REGISTERED_CHANNELS().load(deps.storage, name.clone())?;
+                    chain_info.voucher_contract = Some(contract_addr.clone());
+
+                    CHAIN_REGISTERED_CHANNELS().save(deps.storage, name, &chain_info)?;
+                }
             }
+            Ok(
+                Response::new().add_message(CosmosMsg::Wasm(WasmMsg::Execute {
+                    contract_addr,
+                    msg: to_binary(&Cw20ExecuteMsg::RegisterGate {
+                        contract: env.contract.address,
+                    })?,
+                    funds: vec![],
+                })),
+            )
         }
-        SubMsgResult::Err(err) => Err(ContractError::InitializeCw20Fails { err }),
+        None => Err(ContractError::Std(StdError::generic_err(
+            "VOUCHER_REGISTERING_CHAIN not setted, this shouldn't happen",
+        ))),
     }
 }
 

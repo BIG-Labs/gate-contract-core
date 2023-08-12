@@ -29,14 +29,14 @@ optimize = """docker run --rm -v "$(pwd)":/code \
 """
 
 [dependencies]
-gate-pkg = { path = "../../packages/gate", version = "0.1.0", features = ["gate"] }
-cw20-icg-pkg = { path = "../../packages/cw20-icg", version = "0.1.0" }
+gate-pkg        = { path = "../../packages/gate", version = "0.1.0", features = ["gate"] }
+cw20-icg-pkg    = { path = "../../packages/cw20-icg", version = "0.1.0" }
 cosmwasm-schema = { version = "1.1.0" }
-cosmwasm-std = { version = "1.1.0", features = ["stargate"] }
-cw2 = "1.0.1"
-cw20 = "1.0.1"
-cw20-base = {version = "1.0.1", features = ["library"]}
+cosmwasm-std    = { version = "1.1.0", features = ["stargate"] }
+cw2             = "1.0.1"
+cw20            = "1.0.1"
+cw20-base       = {version = "1.0.1", features = ["library"]}
 cw-storage-plus = "1.0.1"
-schemars = "0.8.10"
-serde = { version = "1.0.145", default-features = false, features = ["derive"] }
-thiserror = { version = "1.0.31" }
+schemars        = "0.8.10"
+serde           = { version = "1.0.145", default-features = false, features = ["derive"] }
+thiserror       = { version = "1.0.31" }

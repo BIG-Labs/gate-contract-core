@@ -5,13 +5,15 @@ use cosmwasm_std::{
 };
 use cw20::Cw20ExecuteMsg;
 use gate_pkg::{
-    ExecuteMsg, GateMsg, GateQueryResponse, GateRequest, GateRequestsInfo, IbcHookMsg,
-    QueryRequestInfoResponse,
+    ExecuteMsg, GateAccountRequest, GateMsg, GateQueryResponse, GateRequest, GateRequestsInfo,
+    IbcHookMsg, QueryRequestInfoResponse,
 };
 
 use crate::{
     error::ContractError,
     functions::{
+        gate_account_add_owners, gate_account_create_account, gate_account_execute_requests,
+        gate_account_remove_owners, gate_account_validate_registration,
         get_chain_and_channel_info_from_registered_channel, remote_contract_is_registered,
     },
     state::{
@@ -188,7 +190,7 @@ pub fn store_pending_gate_packet(
 
 /// Execute all `Requests` in the packet
 pub fn run_private_remote_execute_requests(
-    deps: DepsMut,
+    mut deps: DepsMut,
     env: Env,
     sender: Addr,
     requests_infos: Vec<GateRequestsInfo>,
@@ -247,7 +249,7 @@ pub fn run_private_remote_execute_requests(
                     queries,
                     callback_msg,
                 } => msgs.push(CosmosMsg::Wasm(WasmMsg::Execute {
-                    contract_addr: env.contract.address.to_string(),
+                    contract_addr: env.clone().contract.address.to_string(),
                     msg: to_binary(&ExecuteMsg::PrivateRemoteExecuteQuery {
                         queries,
                         from_contract: request_info.sender.clone(),
@@ -255,6 +257,17 @@ pub fn run_private_remote_execute_requests(
                     })?,
                     funds: vec![],
                 })),
+                GateRequest::GateAccount(gate_account_request) => {
+                    if let Some(msg) = handle_gate_account_request(
+                        &mut deps,
+                        env.clone(),
+                        request_info.sender.clone(),
+                        from_chain.clone(),
+                        gate_account_request,
+                    )? {
+                        msgs.push(msg)
+                    }
+                }
             }
         }
     }
@@ -310,7 +323,7 @@ pub fn run_private_remote_execute_query(
     Ok(Response::new().add_attributes(attributes))
 }
 
-// --- IBC HOOK
+// --- IBC HOOK ---
 
 /// `ibc hook` triggered, execute store `Packet`
 pub fn run_ibc_hook(
@@ -417,6 +430,58 @@ pub fn set_ack_packet_removed(src_key: PacketSavedKey, removed: bool) -> Binary 
     })
     .unwrap()
 }
+
+// --- GATE ACCOUNT ---
+
+fn handle_gate_account_request(
+    deps: &mut DepsMut,
+    env: Env,
+    sender: String,
+    from_chain: String,
+    request: GateAccountRequest,
+) -> Result<Option<CosmosMsg>, ContractError> {
+    match request {
+        GateAccountRequest::CreateAccount {
+            remote_owners,
+            local_owners,
+        } => {
+            gate_account_create_account(deps, env, sender, from_chain, remote_owners, local_owners)
+        }
+        GateAccountRequest::ValidateRegistration { account_addr } => {
+            gate_account_validate_registration(deps, account_addr, sender, from_chain)
+        }
+        GateAccountRequest::AddOwners {
+            remote_owners,
+            local_owners,
+        } => gate_account_add_owners(
+            deps.storage,
+            sender,
+            from_chain,
+            remote_owners,
+            local_owners,
+        ),
+        GateAccountRequest::RemoveOwners {
+            remote_owners,
+            local_owners,
+        } => gate_account_remove_owners(
+            deps.storage,
+            sender,
+            from_chain,
+            remote_owners,
+            local_owners,
+        ),
+        GateAccountRequest::ExecuteMsgs { msgs, send_native } => {
+            let funds = match send_native {
+                Some(send_native) => {
+                    vec![send_native.coin]
+                }
+                None => vec![],
+            };
+            gate_account_execute_requests(deps.storage, sender, from_chain, msgs, funds)
+        }
+    }
+}
+
 // --- FUNCTIONS ---
 
 /// Update `BUFFER_QUERIES_RESPONSE` with new query result

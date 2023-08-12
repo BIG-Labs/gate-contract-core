@@ -1,3 +1,4 @@
+use account_icg_pkg::definitions::MsgToExecuteInfo;
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{
     to_binary, Addr, Binary, Coin, CosmosMsg, Empty, QuerierWrapper, QueryRequest, StdError,
@@ -5,15 +6,20 @@ use cosmwasm_std::{
 };
 use cw20::Cw20ReceiveMsg;
 use cw_storage_plus::Item;
+use serde::{Deserialize, Serialize};
 
-#[cw_serde]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
     /// This msg allow to to gather and collect all `Requests` received during the execution of the binary msg passed.
     ///
     /// The gate contract send the Binary msg to the contract specified.
     ///
     /// The contract have to handle the `ReceiveGateMsg(GateMsg::CollectRequest)` variant.
-    CollectRequests { to_contract: Addr, msg: Binary },
+    CollectRequests {
+        to_contract: Addr,
+        msg: Binary,
+    },
 
     /// Send a list of `GateRequests` to a specific chain.
     SendRequests {
@@ -21,6 +27,8 @@ pub enum ExecuteMsg {
         chain: String,
         timeout: Option<u64>,
     },
+
+    GateAccount(GateAccountRequest),
 
     /// Register the `Permission` for the contract that execute this msg.
     SetPermission {
@@ -93,7 +101,8 @@ pub enum IbcHookMsg {
     ExecutePendingRequest { channel: String, sequence: u64 },
 }
 
-#[cw_serde]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum GateMsg {
     /// Receive msg from a remote chain
     ReceivedMsg {
@@ -138,7 +147,8 @@ impl GateMsg {
     }
 }
 
-#[cw_serde]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum ReceiverExecuteMsg {
     ReceiveGateMsg(GateMsg),
 }
@@ -149,10 +159,12 @@ pub struct Config {
     pub default_timeout: u64,
     pub default_gas_limit: Option<u64>,
     pub cw20_icg_code_id: u64,
+    pub account_icg_code_id: u64,
     pub voucher_contract: Option<String>,
     pub base_denom: String,
     /// When a Packet fails on destination chain, the gate on set a `max_gas` for every `RequestFailed` msg.
     pub max_gas_amount_per_revert: u64,
+    pub index_account: u64,
 }
 
 /// Permission type for contract to receive a `SendMsg` request.
@@ -165,7 +177,8 @@ pub enum Permission {
 }
 
 /// List of Request that can be forwarded to the `gate`.
-#[cw_serde]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum GateRequest {
     /// Send a msg to a specific contract in a remote chain.
     /// The contract that should receive has to:
@@ -184,20 +197,53 @@ pub enum GateRequest {
         queries: Vec<QueryRequest<Empty>>,
         callback_msg: Option<Binary>,
     },
+
+    GateAccount(GateAccountRequest),
 }
 impl GateRequest {
     pub fn send_native(&self) -> Option<SendNativeInfo> {
         match self {
-            GateRequest::SendMsg {
-                send_native: native_token,
-                ..
-            } => native_token.clone(),
+            GateRequest::SendMsg { send_native, .. } => send_native.clone(),
             GateRequest::Query { .. } => None,
+            GateRequest::GateAccount(request) => request.get_send_native(),
         }
     }
 }
 
-#[cw_serde]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum GateAccountRequest {
+    CreateAccount {
+        remote_owners: Option<Vec<(String, String)>>,
+        local_owners: Option<Vec<String>>,
+    },
+    AddOwners {
+        remote_owners: Option<Vec<(String, String)>>,
+        local_owners: Option<Vec<String>>,
+    },
+    RemoveOwners {
+        remote_owners: Option<Vec<(String, String)>>,
+        local_owners: Option<Vec<String>>,
+    },
+    ExecuteMsgs {
+        msgs: Vec<MsgToExecuteInfo>,
+        send_native: Option<SendNativeInfo>,
+    },
+    ValidateRegistration {
+        account_addr: String,
+    },
+}
+
+impl GateAccountRequest {
+    pub fn get_send_native(&self) -> Option<SendNativeInfo> {
+        match self {
+            GateAccountRequest::ExecuteMsgs { send_native, .. } => send_native.clone(),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[non_exhaustive]
 #[cfg(feature = "gate")]
 pub struct GateRequestsInfo {

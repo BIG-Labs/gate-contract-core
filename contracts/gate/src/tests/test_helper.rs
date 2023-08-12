@@ -20,14 +20,12 @@ use gate_pkg::{
 use prost::{encoding::bool, Message};
 use protobuf::Message as ProtoMsg;
 use schemars::_serde_json::{from_str, to_string_pretty};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     contract::{execute, instantiate, reply, sudo},
     error::ContractError,
-    extra::{
-        msg_transfer::{MsgTransfer, MsgTransferResponse},
-        response::MsgInstantiateContractResponse,
-    },
+    extra::msg_transfer::{MsgTransfer, MsgTransferResponse},
     ibc::{ibc_channel_connect, ibc_packet_ack, ibc_packet_receive},
     state::{
         GateAck, IBCLifecycleComplete, InstantiateMsg, MemoField, ReplyID, SudoMsg, WasmField,
@@ -35,7 +33,10 @@ use crate::{
     },
 };
 
-use super::mock_querier::{custom_mock_dependencies, WasmMockQuerier};
+use super::{
+    mock_querier::{custom_mock_dependencies, WasmMockQuerier},
+    response::MsgInstantiateContractResponse,
+};
 
 pub const CONTROLLER: &str = "controller0000";
 pub const OWNER: &str = "owner0000";
@@ -99,6 +100,7 @@ pub fn initialize_gate() -> StdResult<(OwnedDeps<MemoryStorage, MockApi, WasmMoc
         cw20_icg_code_id: 1,
         base_denom: LOCAL_BASE_DENOM.to_string(),
         max_gas_amount_per_revert: MAX_GAS_AMOUNT_PER_REVERT,
+        account_icg_code_id: 2,
     };
 
     let info: MessageInfo = mock_info(OWNER, &[]);
@@ -900,6 +902,7 @@ impl GatesManager {
             cw20_icg_code_id: 1,
             base_denom: base_denom.to_string(),
             max_gas_amount_per_revert: MAX_GAS_AMOUNT_PER_REVERT,
+            account_icg_code_id: 2,
         };
 
         let info: MessageInfo = mock_info(OWNER, &[]);
@@ -1164,7 +1167,8 @@ impl Display for ResponseType {
     }
 }
 
-#[cw_serde]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum SubMsgType {
     SubMsg(SubMsg),
     Reply(Reply),

@@ -29,9 +29,11 @@ pub fn instantiate(
         default_timeout: msg.default_timeout,
         default_gas_limit: msg.default_gas_limit,
         cw20_icg_code_id: msg.cw20_icg_code_id,
+        account_icg_code_id: msg.account_icg_code_id,
         voucher_contract: None,
         base_denom: msg.base_denom,
         max_gas_amount_per_revert: msg.max_gas_amount_per_revert,
+        index_account: 0,
     };
 
     CONIFG.save(deps.storage, &config)?;
@@ -161,6 +163,10 @@ pub fn execute(
         ),
 
         ExecuteMsg::IbcHook(ibc_hook_msg) => on_dest::run_ibc_hook(deps, env, ibc_hook_msg),
+
+        ExecuteMsg::GateAccount(msg) => {
+            on_src::run_gate_account_msg(deps, env, info.sender, info.funds, msg)
+        }
     }
 }
 
@@ -180,7 +186,7 @@ pub fn reply(deps: DepsMut, env: Env, reply: Reply) -> Result<Response, Contract
     match ReplyID::from_repr(reply.id) {
         Some(ReplyID::ExecuteRequest) => on_dest::reply_execute_request(deps, reply.result),
         Some(ReplyID::AckContract) => on_src::reply_ack_contract(deps, reply.result),
-        Some(ReplyID::InitToken) => on_src::reply_init_token(deps, env, reply.result),
+        Some(ReplyID::InitToken) => on_src::reply_init_token(deps, env, reply),
         Some(ReplyID::MintVoucher) => Ok(Response::new()),
         Some(ReplyID::SendIbcHookPacket) => on_src::reply_send_ibc_packet(deps, env, reply.result),
         None => Err(ContractError::InvalidIdReply { id: reply.id }),
