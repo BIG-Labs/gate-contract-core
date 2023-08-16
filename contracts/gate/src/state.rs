@@ -1,7 +1,7 @@
 use cosmwasm_schema::cw_serde;
 use cosmwasm_std::{Addr, Coin, IbcOrder, StdError, StdResult};
 use cw_storage_macro::index_list;
-use cw_storage_plus::{IndexedMap, Item, Map, MultiIndex};
+use cw_storage_plus::{IndexedMap, Item, Map, MultiIndex, UniqueIndex};
 use enum_repr::EnumRepr;
 use gate_pkg::{
     ChannelInfo, Config, GateRequestsInfo, Permission, QueryRequestInfoResponse, SendNativeInfo,
@@ -53,17 +53,15 @@ pub struct PacketSavedKey {
 
 #[index_list(ChannelInfo)]
 pub struct ChannelInfoChannelIndexes<'a> {
-    pub src_channel_dest_channel: MultiIndex<'a, String, ChannelInfo, String>,
+    pub src_channel: UniqueIndex<'a, String, ChannelInfo, String>,
 }
 
 #[allow(non_snake_case)]
-pub fn CHAIN_REGISTERED_CHANNELS<'a>(
-) -> IndexedMap<'a, String, ChannelInfo, ChannelInfoChannelIndexes<'a>> {
+pub fn CHAINS<'a>() -> IndexedMap<'a, String, ChannelInfo, ChannelInfoChannelIndexes<'a>> {
     let indexes = ChannelInfoChannelIndexes {
-        src_channel_dest_channel: MultiIndex::new(
-            |_pk, channel_info| channel_info.src_channel_id.clone(),
-            "ns_chains",
-            "ns_chains_src_channel_dest_channel",
+        src_channel: UniqueIndex::new(
+            |channel_info| channel_info.src_channel_id.clone(),
+            "ns_chains_src",
         ),
     };
     IndexedMap::new("ns_chains", indexes)

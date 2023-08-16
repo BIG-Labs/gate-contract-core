@@ -4,7 +4,7 @@ use cosmwasm_std::{
     from_binary, testing::mock_info, to_binary, Addr, BankMsg, Binary, Coin, ContractInfoResponse,
     CosmosMsg, Decimal, IbcAcknowledgement, IbcEndpoint, IbcMsg, IbcPacket, IbcPacketAckMsg,
     IbcPacketReceiveMsg, IbcPacketTimeoutMsg, IbcTimeout, IbcTimeoutBlock, QueryRequest, Reply,
-    ReplyOn, Response, SubMsg, SubMsgResponse, SubMsgResult, Uint128, WasmMsg, WasmQuery,
+    ReplyOn, Response, StdError, SubMsg, SubMsgResponse, SubMsgResult, Uint128, WasmMsg, WasmQuery,
 };
 use cw20::{Cw20ExecuteMsg, Cw20ReceiveMsg};
 use gate_pkg::{
@@ -971,9 +971,9 @@ fn receive_single_msg_request_no_native_err() {
     if let GateAckType::Error(err) = from_binary::<GateAck>(&res.acknowledgement).unwrap().ack {
         assert_eq!(
             err,
-            ContractError::ChannelNotRegistered {
-                channel: "LOCAL_HACK_CHANNEL".to_string(),
-            }
+            ContractError::Std(StdError::generic_err(
+                "Key not found \"LOCAL_HACK_CHANNEL\""
+            ))
             .to_string()
         )
     }

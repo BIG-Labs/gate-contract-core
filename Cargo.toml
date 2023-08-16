@@ -4,7 +4,7 @@ members = ["contracts/*", "packages/*"]
 [workspace.dependencies]
 cosmwasm-schema  = { version = "1.2.0"  }
 cosmwasm-std     = { version = "1.2.0", features = ["stargate", "ibc3", "cosmwasm_1_2"] }
-rhaki-cw-plus    = { version = "0.3.0"  }
+rhaki-cw-plus    = { version = "0.3.1"  }
 cw-storage-macro = { version = "1.0.1"  } 
 cw-storage-plus  = { version = "1.0.1"  }
 cw2              = { version = "1.0.1"  }

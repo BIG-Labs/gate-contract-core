@@ -23,9 +23,9 @@ use crate::{
     state::{
         Cw20MsgType, ForwardField, GateAck, GateAckType, GatePacket, GatePacketInfo, MemoField,
         PacketSavedKey, RegisteringVoucherChain, ReplyID, RequestsPacket, WasmField,
-        BUFFER_PACKETS, CHAIN_REGISTERED_CHANNELS, CHANNEL_INFO, CONIFG, IS_REGISTERING,
-        LAST_FAILED_KEY_GENERATED, LOCAL_CHAIN_NAME, PACKET_IBC_HOOK_AWAITING_ACK,
-        PACKET_IBC_HOOK_AWAITING_REPLY, REGISTERED_CONTRACTS, VOUCHER_REGISTERING_CHAIN,
+        BUFFER_PACKETS, CHAINS, CHANNEL_INFO, CONIFG, IS_REGISTERING, LAST_FAILED_KEY_GENERATED,
+        LOCAL_CHAIN_NAME, PACKET_IBC_HOOK_AWAITING_ACK, PACKET_IBC_HOOK_AWAITING_REPLY,
+        REGISTERED_CONTRACTS, VOUCHER_REGISTERING_CHAIN,
     },
 };
 
@@ -181,7 +181,7 @@ pub fn run_register_remote_chain_and_channel(
         }),
     )?;
 
-    CHAIN_REGISTERED_CHANNELS().save(deps.storage, chain.clone(), &channel_info)?;
+    CHAINS().save(deps.storage, chain.clone(), &channel_info)?;
 
     Ok(Response::new()
         .add_submessage(sub_msg)
@@ -366,11 +366,10 @@ pub fn reply_init_token(deps: DepsMut, env: Env, reply: Reply) -> Result<Respons
                 }
 
                 RegisteringVoucherChain::Chain { name } => {
-                    let mut chain_info =
-                        CHAIN_REGISTERED_CHANNELS().load(deps.storage, name.clone())?;
+                    let mut chain_info = CHAINS().load(deps.storage, name.clone())?;
                     chain_info.voucher_contract = Some(contract_addr.clone());
 
-                    CHAIN_REGISTERED_CHANNELS().save(deps.storage, name, &chain_info)?;
+                    CHAINS().save(deps.storage, name, &chain_info)?;
                 }
             }
             Ok(
@@ -887,7 +886,7 @@ fn save_permission(
     chain: String,
 ) -> Result<(), ContractError> {
     // Check if the chain is registered
-    if !CHAIN_REGISTERED_CHANNELS().has(storage, chain.clone()) {
+    if !CHAINS().has(storage, chain.clone()) {
         return Err(ContractError::ChainNotFound { chain });
     }
 

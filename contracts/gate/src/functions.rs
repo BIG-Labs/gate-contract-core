@@ -1,7 +1,7 @@
 use account_icg_pkg::definitions::MsgToExecuteInfo;
 use cosmwasm_std::{
-    to_binary, Addr, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, Order, StdError, StdResult,
-    Storage, WasmMsg,
+    to_binary, Addr, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, StdError, StdResult, Storage,
+    WasmMsg,
 };
 use gate_pkg::{ChannelInfo, Config, Permission};
 use rhaki_cw_plus::wasm::generate_instantiate_2_addr;
@@ -10,8 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     error::ContractError,
     state::{
-        GateAccountState, CHAIN_REGISTERED_CHANNELS, CONIFG, GATE_ACCOUNT, LOCAL_CHAIN_NAME,
-        REGISTERED_CONTRACTS,
+        GateAccountState, CHAINS, CONIFG, GATE_ACCOUNT, LOCAL_CHAIN_NAME, REGISTERED_CONTRACTS,
     },
 };
 
@@ -37,24 +36,12 @@ pub fn get_chain_and_channel_info_from_registered_channel(
     storage: &dyn Storage,
     src_channel: String,
 ) -> Result<(String, ChannelInfo), ContractError> {
-    let channels_info: Vec<(String, ChannelInfo)> = CHAIN_REGISTERED_CHANNELS()
-        .idx
-        .src_channel_dest_channel
-        .prefix(src_channel.clone())
-        .range(storage, None, None, Order::Ascending)
-        .take(usize::from(1_u8))
-        .map(|tuple| tuple.unwrap())
-        .collect();
-
-    if channels_info.is_empty() {
-        return Err(ContractError::ChannelNotRegistered {
-            channel: src_channel,
-        });
-    }
-
-    let channel_info = channels_info.first().unwrap();
-
-    Ok(channel_info.to_owned())
+    rhaki_cw_plus::storage::multi_index::get_unique_value(
+        storage,
+        src_channel,
+        CHAINS().idx.src_channel,
+    )
+    .map_err(|err| err.into())
 }
 
 /// Return a `channl-id` from a `chain`.
@@ -62,7 +49,7 @@ pub fn get_channel_from_chain(
     storage: &dyn Storage,
     chain: &String,
 ) -> Result<String, ContractError> {
-    match CHAIN_REGISTERED_CHANNELS().load(storage, chain.to_owned()) {
+    match CHAINS().load(storage, chain.to_owned()) {
         Ok(channel_info) => Ok(channel_info.src_channel_id),
         Err(_) => Err(ContractError::ChainNotFound {
             chain: chain.to_owned(),
@@ -75,7 +62,7 @@ pub fn get_remote_gate_addr_from_chain(
     storage: &dyn Storage,
     chain: &String,
 ) -> Result<String, ContractError> {
-    match CHAIN_REGISTERED_CHANNELS().load(storage, chain.to_owned()) {
+    match CHAINS().load(storage, chain.to_owned()) {
         Ok(channel_info) => Ok(channel_info.get_remote_gate()?),
         Err(_) => Err(ContractError::ChainNotFound {
             chain: chain.to_owned(),

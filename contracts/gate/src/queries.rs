@@ -3,7 +3,7 @@ use gate_pkg::{ChannelInfo, Config, Permission};
 
 use crate::{
     error::ContractError,
-    state::{CHAIN_REGISTERED_CHANNELS, CONIFG, REGISTERED_CONTRACTS},
+    state::{CHAINS, CONIFG, REGISTERED_CONTRACTS},
 };
 
 /// Get saved `Config`
@@ -28,7 +28,7 @@ pub fn qy_permission(
 
 /// Get channel info
 pub fn qy_channel_info(deps: Deps, chain: String) -> Result<ChannelInfo, ContractError> {
-    let channel = CHAIN_REGISTERED_CHANNELS().load(deps.storage, chain)?;
+    let channel = CHAINS().load(deps.storage, chain)?;
 
     Ok(channel)
 }
